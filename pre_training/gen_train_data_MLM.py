@@ -5,7 +5,8 @@ from tempfile import TemporaryDirectory
 import collections, jsonlines
 
 from random import random, randrange, randint, shuffle, choice, sample
-from pytorch_pretrained_bert.tokenization import BertTokenizer
+# from pytorch_pretrained_bert.tokenization import BertTokenizer
+from transformers import RobertaTokenizer, AlbertTokenizer, BertTokenizer
 import numpy as np
 import ujson as json
 
@@ -13,8 +14,7 @@ import ujson as json
 MaskedLmInstance = collections.namedtuple("MaskedLmInstance", ["index", "label"])
 
 def create_masked_lm_predictions(tokens, masked_lm_prob, max_predictions_per_seq, whole_word_mask, vocab_list):
-    """Creates the predictions for the masked LM objective. This is mostly copied from the Google BERT repo, but
-    with several refactors to clean it up and remove a lot of unnecessary variables."""
+    """Creates the predictions for the masked LM objective."""
     cand_indices = []
     for (i, token) in enumerate(tokens):
         if token == "[CLS]" or token == "[SEP]":
@@ -76,7 +76,7 @@ def create_masked_lm_predictions(tokens, masked_lm_prob, max_predictions_per_seq
 def create_instances_from_document(
         document, max_seq_length, short_seq_prob,
         masked_lm_prob, max_predictions_per_seq, whole_word_mask, vocab_list):
-    # document is a list of toknzd sents
+    # document is a list of toknized sents
     # Account for [CLS], [SEP]
     max_num_tokens = max_seq_length - 2
 
@@ -102,11 +102,11 @@ def create_instances_from_document(
     i = 0
     while i < len(document):
         segment = document[i]
-        current_chunk.append(segment) # append to sents to current_chunk until target_seq_length
+        current_chunk.append(segment)  # append to sents to current_chunk until target_seq_length
         current_length += len(segment)
 
         if i == len(document) - 1 or current_length >= target_seq_length:
-            tokens = sum(current_chunk, [])  
+            tokens = sum(current_chunk, [])
             truncate_seq(tokens, max_num_tokens)
             if tokens:
                 tokens = ["[CLS]"] + tokens + ["[SEP]"]
@@ -143,14 +143,46 @@ def truncate_seq(tokens, max_num_tokens):
             tokens.pop()
 
 
-def split_digits(wps):
+def split_digits(wps, bert_model="bert"):
     # further split numeric wps
     toks = []
+    if bert_model == "bert":
+        for wp in wps:
+            if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:  # numeric wp - split digits
+                for i, dgt in enumerate(list(wp.replace('#', ''))):
+                    prefix = '##' if (wp.startswith('##') or i > 0) else ''
+                    toks.append(prefix + dgt)
+            else:
+                toks.append(wp)
+    elif bert_model == "roberta":
+        # Further split numeric wps by Byte-Pair Encoding as in RoBERTa (e.g., Ġ (\u0120) in front of the start of every word)
+        for wp in wps:
+            if set(wp).issubset(set('0123456789\u0120')) and set(wp) != {'\u0120'}:
+                for i, dgt in enumerate(list(wp.replace('\u0120', ''))):
+                    prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0) else ''
+                    toks.append(prefix + dgt)
+            else:
+                toks.append(wp)
+    elif bert_model == "albert":
+        for wp in wps:
+            if set(wp).issubset(set('0123456789▁')) and set(wp) != {'▁'}:  # Special '▁' token (not an underscore!)
+                for i, dgt in enumerate(list(wp.replace('▁', ''))):
+                    prefix = '▁' if (wp.strip()[0] == '▁' and i == 0) else ''
+                    toks.append(prefix + dgt)
+            else:
+                toks.append(wp)
+    else:
+        raise TypeError("The `bert_model` should be one of bert, roberta and albert.")
+    return toks
+
+
+def split_digits_nonsubwords(wps):
+    # Further split numeric wps - but remove "##" (the subword indicator)
+    toks = []
     for wp in wps:
-        if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}: # numeric wp - split digits
+        if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:
             for i, dgt in enumerate(list(wp.replace('#', ''))):
-                prefix = '##' if (wp.startswith('##') or i > 0) else ''
-                toks.append(prefix + dgt)
+                toks.append(dgt)
         else:
             toks.append(wp)
     return toks
@@ -164,7 +196,7 @@ def main():
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--bert_model", type=str, required=True,
                         choices=["bert-base-uncased", "bert-large-uncased", "bert-base-cased",
-                                 "bert-base-multilingual", "bert-base-chinese"])
+                                 "bert-base-multilingual", "bert-base-chinese", "roberta-base"])
     parser.add_argument("--do_lower_case", action="store_true")
     parser.add_argument("--do_whole_word_mask", action="store_true",
                         help="Whether to use whole word masking rather than per-WordPiece masking.")
@@ -181,10 +213,16 @@ def main():
                         help="Maximum number of tokens to mask in each sequence")
     
     args = parser.parse_args()
+
+    model_prefix = args.bert_model.split("-")[0].strip()
+    if model_prefix == "bert":
+        tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
+    elif model_prefix == "roberta":
+        tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
+    elif model_prefix == "albert":
+        tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2', do_lower_case=args.do_lower_case)
     
-    
-    tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
-    digit_tokenize = lambda s: split_digits(tokenizer.tokenize(s))
+    digit_tokenize = lambda s: split_digits(tokenizer.tokenize(s), bert_model=model_prefix)
     vocab_list = list(tokenizer.vocab.keys())
     
     with jsonlines.open(args.train_corpus, 'r') as reader:
@@ -193,7 +231,10 @@ def main():
     for d in tqdm(data):
         doc = [digit_tokenize(sent) if args.digitize else tokenizer.tokenize(sent)
                for sent in d['sents']]
-        if doc: docs.append(doc)
+        print("digit_tokenized (doc): {}".format(doc))
+        exit()
+        if doc:
+            docs.append(doc)
         
     # docs is a list of docs - each doc is a list of sents - each sent is list of tokens
     args.output_dir.mkdir(exist_ok=True)
