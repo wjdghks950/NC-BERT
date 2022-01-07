@@ -1,4 +1,4 @@
-## Injecting Numerical Reasoning Skills into Language Models
+## NC-BERT: A Numerical-Contextual BERT for Numerical Reasoning
 
 This repository contains the accompanying code for the paper:
 
