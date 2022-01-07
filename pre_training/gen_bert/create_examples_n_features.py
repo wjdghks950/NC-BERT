@@ -1,10 +1,7 @@
 import os, json, copy, string, itertools, logging, pickle, argparse, jsonlines
-import numpy as np
-from random import choice
-from decimal import Decimal
-from typing import Any, Dict, List, Tuple, Callable
-import collections
+from typing import Any, Dict, List, Tuple
 from collections import defaultdict
+import re
 
 from allennlp.common.file_utils import cached_path
 from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
@@ -425,9 +422,12 @@ class DropReader(object):
 
 def split_digits(wps, bert_model="bert"):
     # further split numeric wps
+    pattern = re.compile(r"\d+([\d,.]+)?\d*")  # Deal with numbers like "7,000", "0.159"
     toks = []
     if bert_model == "bert":
         for wp in wps:
+            if len(pattern.findall(wp)) > 0:
+                wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:  # numeric wp - split digits
                 for i, dgt in enumerate(list(wp.replace('#', ''))):
                     prefix = '##' if (wp.startswith('##') or i > 0) else ''
@@ -437,6 +437,8 @@ def split_digits(wps, bert_model="bert"):
     elif bert_model == "roberta":
         # Further split numeric wps by Byte-Pair Encoding as in RoBERTa (e.g., Ġ (\u0120) in front of the start of every word)
         for wp in wps:
+            if len(pattern.findall(wp)) > 0:
+                wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789\u0120')) and set(wp) != {'\u0120'}:
                 for i, dgt in enumerate(list(wp.replace('\u0120', ''))):
                     prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0) else ''
@@ -445,6 +447,8 @@ def split_digits(wps, bert_model="bert"):
                 toks.append(wp)
     elif bert_model == "albert":
         for wp in wps:
+            if len(pattern.findall(wp)) > 0:
+                wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789▁')) and set(wp) != {'▁'}:  # Special '▁' token (not an underscore!)
                 for i, dgt in enumerate(list(wp.replace('▁', ''))):
                     prefix = '▁' if (wp.strip()[0] == '▁' and i == 0) else ''
@@ -454,7 +458,6 @@ def split_digits(wps, bert_model="bert"):
     else:
         raise TypeError("The `bert_model` should be one of bert, roberta and albert.")
     return toks
-
 
 def split_digits_nonsubwords(wps: List[str]) -> List[str]:
     # Further split numeric wps - but remove "##" (the subword indicator)
