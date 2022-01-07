@@ -11,7 +11,8 @@ from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
 from allennlp.data.dataset_readers.reading_comprehension.util import IGNORED_TOKENS, STRIPPED_CHARACTERS
 from tqdm import tqdm
 
-from pytorch_pretrained_bert.tokenization import BertTokenizer
+# from pytorch_pretrained_bert.tokenization import BertTokenizer
+from transformers import BertTokenizer
 from w2n import word_to_num
 
 # create logger
@@ -19,7 +20,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+tokenizer.add_tokens("e")
+tokenizer.add_tokens("[CTX]")  # `[CTX]` token to replace numbers in text
+
+# Need to treat digit-level tokens as a single token
+for i in range(15):  # until 10e14
+    if i == 0:
+        tokenizer.add_tokens("10e0")
+    else:
+        tokenizer.add_tokens("10e" + str(i))  # 10ebased
+        tokenizer.add_tokens("1" + "0" * i)
+
 
 START_TOK, END_TOK, SPAN_SEP, IGNORE_IDX, MAX_DECODING_STEPS = '@', '\\', ';', 0, 20 
 
@@ -200,7 +212,7 @@ class DropReader(object):
         self.logger.info("Reading file at %s", file_path)
         dataset = read_file(file_path)
         examples, skip_count = [], 0
-        for passage_id, passage_info in tqdm(dataset.items()): 
+        for passage_id, passage_info in tqdm(dataset.items()):
             passage_text = passage_info["passage"]
             for question_answer in passage_info["qa_pairs"]:
                 question_id = question_answer["query_id"]
@@ -213,6 +225,8 @@ class DropReader(object):
                 if not answer_annotations:
                     # for test set use a dummy
                     answer_annotations = [{'number':'0', 'date':{"month":'', "day":'', "year":''}, 'spans':[]}]
+                # print("question_text: ", question_text)
+                # print("passage_text: ", passage_text)
                 example = self.text_to_example(question_text, passage_text, passage_id, question_id, answer_annotations)
                 if example is not None:
                     examples.append(example)
@@ -250,7 +264,7 @@ class DropReader(object):
             number_of_answer = min(len(answer_texts), self.max_number_of_answer)
         
         if answer_type is None or (answer_type == 'spans' and len(answer_texts) > 1 and not self.include_multi_span): 
-            return None # multi-span
+            return None  # multi-span
         
        # Tokenize the answer text in order to find the matched span based on token
         tokenized_answer_texts = []
@@ -387,7 +401,10 @@ class DropReader(object):
         for answer_text in answer_texts:
             answer_tokens = [token.text.lower().strip(STRIPPED_CHARACTERS) for token in answer_text]
             num_answer_tokens = len(answer_tokens)
-            if answer_tokens[0] not in word_positions:
+            try:
+                if answer_tokens[0] not in word_positions:
+                    continue
+            except IndexError:
                 continue
             for span_start in word_positions[answer_tokens[0]]:
                 span_end = span_start  # span_end is _inclusive_
@@ -405,17 +422,51 @@ class DropReader(object):
                     spans.append((span_start, span_end))
         return spans
 
-def split_digits(wps: List[str]) -> List[str]:
+
+def split_digits(wps, bert_model="bert"):
     # further split numeric wps
     toks = []
+    if bert_model == "bert":
+        for wp in wps:
+            if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:  # numeric wp - split digits
+                for i, dgt in enumerate(list(wp.replace('#', ''))):
+                    prefix = '##' if (wp.startswith('##') or i > 0) else ''
+                    toks.append(prefix + dgt)
+            else:
+                toks.append(wp)
+    elif bert_model == "roberta":
+        # Further split numeric wps by Byte-Pair Encoding as in RoBERTa (e.g., Ġ (\u0120) in front of the start of every word)
+        for wp in wps:
+            if set(wp).issubset(set('0123456789\u0120')) and set(wp) != {'\u0120'}:
+                for i, dgt in enumerate(list(wp.replace('\u0120', ''))):
+                    prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0) else ''
+                    toks.append(prefix + dgt)
+            else:
+                toks.append(wp)
+    elif bert_model == "albert":
+        for wp in wps:
+            if set(wp).issubset(set('0123456789▁')) and set(wp) != {'▁'}:  # Special '▁' token (not an underscore!)
+                for i, dgt in enumerate(list(wp.replace('▁', ''))):
+                    prefix = '▁' if (wp.strip()[0] == '▁' and i == 0) else ''
+                    toks.append(prefix + dgt)
+            else:
+                toks.append(wp)
+    else:
+        raise TypeError("The `bert_model` should be one of bert, roberta and albert.")
+    return toks
+
+
+def split_digits_nonsubwords(wps: List[str]) -> List[str]:
+    # Further split numeric wps - but remove "##" (the subword indicator)
+    toks = []
     for wp in wps:
-        if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}: # numeric wp - split digits
+        if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:
             for i, dgt in enumerate(list(wp.replace('#', ''))):
-                prefix = '##' if (wp.startswith('##') or i > 0) else ''
-                toks.append(prefix + dgt)
+                toks.append(dgt)
         else:
             toks.append(wp)
     return toks
+
 
 def convert_answer_spans(spans, orig_to_tok_index, all_len, all_tokens):
     tok_start_positions, tok_end_positions = [], []
@@ -435,12 +486,13 @@ def convert_answer_spans(spans, orig_to_tok_index, all_len, all_tokens):
 def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decoding_steps, indiv_digits=True, logger=None):
     """Loads a data file into a list of `InputBatch`s."""
 
-    logger.info('creating features')
+    logger.info('Creating features from `examples (DropExample -> DropFeatures)`')
     unique_id = 1000000000
     skip_count, truncate_count = 0, 0
     
-    tokenize = (lambda s: split_digits(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
-    
+    # tokenize = (lambda s: split_digits(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
+    tokenize = (lambda s: split_digits_nonsubwords(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
+
     features, all_qp_lengths = [], []
     for (example_index, example) in enumerate(tqdm(examples)):
         que_tok_to_orig_index = []
@@ -600,6 +652,9 @@ def main():
     parser.add_argument("--output_dir", default='data/examples_n_features', type=str, help="Output dir.")
     parser.add_argument("--max_seq_length", default=512, type=int, help="max seq len of [cls] q [sep] p [sep]")
     parser.add_argument("--max_decoding_steps", default=20, type=int, help="max tokens to be generated by decoder")
+    parser.add_argument("--percent", default="all", type=str, help="0.05, 0.1, 0.5, vs. all")
+    parser.add_argument("--perturb_type", default="mult100", type=str, help="add10, add100, factor10, factor100")
+    parser.add_argument("--surface_form", default="original", type=str, help="extrapolate vs. dataset (i.e., original drop), 10ebased, 10based, edigit, digit")
     
     args = parser.parse_args()
     
@@ -619,11 +674,25 @@ def main():
         indiv_digits=True,
         logger=logger)
 
-    
     os.makedirs(args.output_dir, exist_ok=True)
     split = 'train' if args.split == 'train' else 'eval'
-    write_file(examples, args.output_dir + '/%s_examples.pkl' % split)
-    write_file(features, args.output_dir + '/%s_features.pkl' % split)
+    
+    if args.surface_form == "extrapolate" and args.perturb_type in ["add10", "add100", "factor10", "factor100", "randadd10", "randfactor100"]:
+        write_file(examples, args.output_dir + '/%s_%s_%s_examples.pkl' % (split, args.surface_form, args.perturb_type))
+        write_file(features, args.output_dir + '/%s_%s_%s_features.pkl' % (split, args.surface_form, args.perturb_type))
+    elif args.surface_form in ["10ebased", "10based", "character"] and args.perturb_type in ["add10", "add100", "factor10", "factor100", "randadd10", "randfactor100"]:
+        write_file(examples, args.output_dir + '/%s_%s_%s_examples.pkl' % (split, args.surface_form, args.perturb_type))
+        write_file(features, args.output_dir + '/%s_%s_%s_features.pkl' % (split, args.surface_form, args.perturb_type))
+    elif args.surface_form != "extrapolate" and args.drop_json.split("_")[2] == "dataset":
+        write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[2]))
+        write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[2]))
+    elif args.surface_form != "extrapolate" and (args.drop_json.split("_")[1] in ["numeric", "textual"]):
+        write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[1]))
+        write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[1]))
+    else:
+        raise ValueError("Invalid args.surface_form, args.perturb_type.")
+    print("DROP dataset preprocessing COMPLETE. Pkl file saved.")
+
 
 if __name__ == "__main__":
     main()
