@@ -3,6 +3,7 @@ from pathlib import Path
 from tqdm import tqdm, trange
 from tempfile import TemporaryDirectory
 import collections, jsonlines
+import re
 
 from random import random, randrange, randint, shuffle, choice, sample
 # from pytorch_pretrained_bert.tokenization import BertTokenizer
@@ -145,9 +146,12 @@ def truncate_seq(tokens, max_num_tokens):
 
 def split_digits(wps, bert_model="bert"):
     # further split numeric wps
+    pattern = re.compile(r"\d+([\d,.]+)?\d*")  # Deal with numbers like "7,000", "0.159"
     toks = []
     if bert_model == "bert":
         for wp in wps:
+            if len(pattern.findall(wp)) > 0:
+                wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:  # numeric wp - split digits
                 for i, dgt in enumerate(list(wp.replace('#', ''))):
                     prefix = '##' if (wp.startswith('##') or i > 0) else ''
@@ -157,6 +161,8 @@ def split_digits(wps, bert_model="bert"):
     elif bert_model == "roberta":
         # Further split numeric wps by Byte-Pair Encoding as in RoBERTa (e.g., Ġ (\u0120) in front of the start of every word)
         for wp in wps:
+            if len(pattern.findall(wp)) > 0:
+                wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789\u0120')) and set(wp) != {'\u0120'}:
                 for i, dgt in enumerate(list(wp.replace('\u0120', ''))):
                     prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0) else ''
@@ -165,6 +171,8 @@ def split_digits(wps, bert_model="bert"):
                 toks.append(wp)
     elif bert_model == "albert":
         for wp in wps:
+            if len(pattern.findall(wp)) > 0:
+                wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789▁')) and set(wp) != {'▁'}:  # Special '▁' token (not an underscore!)
                 for i, dgt in enumerate(list(wp.replace('▁', ''))):
                     prefix = '▁' if (wp.strip()[0] == '▁' and i == 0) else ''
@@ -196,7 +204,7 @@ def main():
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--bert_model", type=str, required=True,
                         choices=["bert-base-uncased", "bert-large-uncased", "bert-base-cased",
-                                 "bert-base-multilingual", "bert-base-chinese", "roberta-base"])
+                                 "bert-base-multilingual", "bert-base-chinese", "roberta-base", "roberta-large", "albert-xxlarge-v2"])
     parser.add_argument("--do_lower_case", action="store_true")
     parser.add_argument("--do_whole_word_mask", action="store_true",
                         help="Whether to use whole word masking rather than per-WordPiece masking.")
@@ -223,7 +231,10 @@ def main():
         tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2', do_lower_case=args.do_lower_case)
     
     digit_tokenize = lambda s: split_digits(tokenizer.tokenize(s), bert_model=model_prefix)
-    vocab_list = list(tokenizer.vocab.keys())
+    try:
+        vocab_list = list(tokenizer.vocab.keys())
+    except AttributeError:  # Caused by the missing `vocab` attribute from the updated tokenizer
+        vocab_list = list(tokenizer.get_vocab().keys())
     
     with jsonlines.open(args.train_corpus, 'r') as reader:
         data = [d for d in tqdm(reader.iter())]
