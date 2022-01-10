@@ -9,7 +9,7 @@ from allennlp.data.dataset_readers.reading_comprehension.util import IGNORED_TOK
 from tqdm import tqdm
 
 # from pytorch_pretrained_bert.tokenization import BertTokenizer
-from transformers import BertTokenizer
+from transformers import BertTokenizer, AlbertTokenizer, RobertaTokenizer
 from w2n import word_to_num
 
 # create logger
@@ -18,17 +18,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-tokenizer.add_tokens("e")
-tokenizer.add_tokens("[CTX]")  # `[CTX]` token to replace numbers in text
-
-# Need to treat digit-level tokens as a single token
-for i in range(15):  # until 10e14
-    if i == 0:
-        tokenizer.add_tokens("10e0")
-    else:
-        tokenizer.add_tokens("10e" + str(i))  # 10ebased
-        tokenizer.add_tokens("1" + "0" * i)
-
 
 START_TOK, END_TOK, SPAN_SEP, IGNORE_IDX, MAX_DECODING_STEPS = '@', '\\', ';', 0, 20 
 
@@ -658,8 +647,21 @@ def main():
     parser.add_argument("--percent", default="all", type=str, help="0.05, 0.1, 0.5, vs. all")
     parser.add_argument("--perturb_type", default="mult100", type=str, help="add10, add100, factor10, factor100")
     parser.add_argument("--surface_form", default="original", type=str, help="extrapolate vs. dataset (i.e., original drop), 10ebased, 10based, edigit, digit")
-    
+    parser.add_argument("--bert_model", type=str, required=True,
+                        choices=["bert-base-uncased", "bert-large-uncased", "bert-base-cased",
+                        "bert-base-multilingual", "bert-base-chinese", "roberta-base", "roberta-large", "albert-xxlarge-v2"])
+
     args = parser.parse_args()
+
+    model_prefix = args.bert_model.split("-")[0].strip()
+    if model_prefix == "bert":
+        tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
+    elif model_prefix == "roberta":
+        tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
+    elif model_prefix == "albert":
+        tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2', do_lower_case=args.do_lower_case)
+    else:
+        raise AttributeError("Specified attribute {} is not found".format(args.bert_model))
     
     drop_reader = DropReader(max_n_samples=args.max_n_samples,
                              include_more_numbers=True,
