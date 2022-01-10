@@ -485,7 +485,8 @@ def convert_examples_to_features(examples, tokenizer, tokenizer_model, max_seq_l
     unique_id = 1000000000
     skip_count, truncate_count = 0, 0
     
-    tokenize = (lambda s: split_digits(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
+    make_subword = False
+    tokenize = (lambda s: split_digits(tokenizer.tokenize(s), bert_model=tokenizer_model, subword=make_subword)) if indiv_digits else tokenizer.tokenize
     # tokenize = (lambda s: split_digits_nonsubwords(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
 
     features, all_qp_lengths = [], []
@@ -662,7 +663,7 @@ def main():
     elif model_prefix == "roberta":
         tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
     elif model_prefix == "albert":
-        tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2', do_lower_case=args.do_lower_case)
+        tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2')
     else:
         raise AttributeError("Specified attribute {} is not found".format(args.bert_model))
     
@@ -689,15 +690,15 @@ def main():
     if args.surface_form == "extrapolate" and args.perturb_type in ["add10", "add100", "factor10", "factor100", "randadd10", "randfactor100"]:
         write_file(examples, args.output_dir + '/%s_%s_%s_examples.pkl' % (split, args.surface_form, args.perturb_type))
         write_file(features, args.output_dir + '/%s_%s_%s_features.pkl' % (split, args.surface_form, args.perturb_type))
-    elif args.surface_form in ["10ebased", "10based", "character"] and args.perturb_type in ["add10", "add100", "factor10", "factor100", "randadd10", "randfactor100"]:
-        write_file(examples, args.output_dir + '/%s_%s_%s_examples.pkl' % (split, args.surface_form, args.perturb_type))
-        write_file(features, args.output_dir + '/%s_%s_%s_features.pkl' % (split, args.surface_form, args.perturb_type))
-    elif args.surface_form != "extrapolate" and args.drop_json.split("_")[2] == "dataset":
-        write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[2]))
-        write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[2]))
-    elif args.surface_form != "extrapolate" and (args.drop_json.split("_")[1] in ["numeric", "textual"]):
-        write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[1]))
-        write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[1]))
+    elif args.surface_form != "extrapolate":
+        if args.drop_json.split("_")[2] in ["dataset"]:
+            write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[2]))
+            write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[2]))
+        elif args.drop_json.split("_")[1] in ["numeric", "textual"]:
+            write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[1]))
+            write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[1]))
+        else:
+            pass
     else:
         raise ValueError("Invalid args.surface_form, args.perturb_type.")
     print("DROP dataset preprocessing COMPLETE. Pkl file saved.")

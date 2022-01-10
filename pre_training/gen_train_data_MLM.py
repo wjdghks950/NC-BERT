@@ -229,7 +229,7 @@ def main():
     elif model_prefix == "roberta":
         tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
     elif model_prefix == "albert":
-        tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2', do_lower_case=args.do_lower_case)
+        tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2')
     else:
         raise AttributeError("Specified attribute {} is not found".format(args.bert_model))
     
@@ -238,7 +238,7 @@ def main():
         vocab_list = list(tokenizer.vocab.keys())
     except AttributeError:  # Caused by the missing `vocab` attribute from the updated tokenizer
         vocab_list = list(tokenizer.get_vocab().keys())
-    
+   
     with jsonlines.open(args.train_corpus, 'r') as reader:
         data = [d for d in tqdm(reader.iter())]
     docs = []
