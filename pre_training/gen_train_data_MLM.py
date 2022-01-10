@@ -144,7 +144,7 @@ def truncate_seq(tokens, max_num_tokens):
             tokens.pop()
 
 
-def split_digits(wps, bert_model="bert"):
+def split_digits(wps, bert_model="bert", subword=True):
     # further split numeric wps
     pattern = re.compile(r"\d+([\d,.]+)?\d*")  # Deal with numbers like "7,000", "0.159"
     toks = []
@@ -154,7 +154,7 @@ def split_digits(wps, bert_model="bert"):
                 wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:  # numeric wp - split digits
                 for i, dgt in enumerate(list(wp.replace('#', ''))):
-                    prefix = '##' if (wp.startswith('##') or i > 0) else ''
+                    prefix = '##' if (wp.startswith('##') or i > 0) and subword else ''
                     toks.append(prefix + dgt)
             else:
                 toks.append(wp)
@@ -165,7 +165,7 @@ def split_digits(wps, bert_model="bert"):
                 wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789\u0120')) and set(wp) != {'\u0120'}:
                 for i, dgt in enumerate(list(wp.replace('\u0120', ''))):
-                    prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0) else ''
+                    prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0 and subword) else ''
                     toks.append(prefix + dgt)
             else:
                 toks.append(wp)
@@ -175,7 +175,7 @@ def split_digits(wps, bert_model="bert"):
                 wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789▁')) and set(wp) != {'▁'}:  # Special '▁' token (not an underscore!)
                 for i, dgt in enumerate(list(wp.replace('▁', ''))):
-                    prefix = '▁' if (wp.strip()[0] == '▁' and i == 0) else ''
+                    prefix = '▁' if (wp.strip()[0] == '▁' and i == 0 and subword) else ''
                     toks.append(prefix + dgt)
             else:
                 toks.append(wp)
@@ -188,8 +188,9 @@ def split_digits_nonsubwords(wps):
     # Further split numeric wps - but remove "##" (the subword indicator)
     toks = []
     for wp in wps:
-        if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:
-            for i, dgt in enumerate(list(wp.replace('#', ''))):
+        if set(wp).issubset(set('\u0120▁#0123456789')) and not set(wp).issubset({'\u0120', '▁', '#'}):
+            new_wp = wp.replace('#', '').replace('▁', '').replace('\u0120', '')
+            for i, dgt in enumerate(list(new_wp)):
                 toks.append(dgt)
         else:
             toks.append(wp)
@@ -229,6 +230,8 @@ def main():
         tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
     elif model_prefix == "albert":
         tokenizer = AlbertTokenizer.from_pretrained('albert-xxlarge-v2', do_lower_case=args.do_lower_case)
+    else:
+        raise AttributeError("Specified attribute {} is not found".format(args.bert_model))
     
     digit_tokenize = lambda s: split_digits(tokenizer.tokenize(s), bert_model=model_prefix)
     try:
@@ -242,8 +245,6 @@ def main():
     for d in tqdm(data):
         doc = [digit_tokenize(sent) if args.digitize else tokenizer.tokenize(sent)
                for sent in d['sents']]
-        print("digit_tokenized (doc): {}".format(doc))
-        exit()
         if doc:
             docs.append(doc)
         
