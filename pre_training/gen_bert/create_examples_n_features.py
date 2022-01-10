@@ -409,7 +409,7 @@ class DropReader(object):
         return spans
 
 
-def split_digits(wps, bert_model="bert"):
+def split_digits(wps, bert_model="bert", subword=True):
     # further split numeric wps
     pattern = re.compile(r"\d+([\d,.]+)?\d*")  # Deal with numbers like "7,000", "0.159"
     toks = []
@@ -419,7 +419,7 @@ def split_digits(wps, bert_model="bert"):
                 wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:  # numeric wp - split digits
                 for i, dgt in enumerate(list(wp.replace('#', ''))):
-                    prefix = '##' if (wp.startswith('##') or i > 0) else ''
+                    prefix = '##' if (wp.startswith('##') or i > 0) and subword else ''
                     toks.append(prefix + dgt)
             else:
                 toks.append(wp)
@@ -430,7 +430,7 @@ def split_digits(wps, bert_model="bert"):
                 wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789\u0120')) and set(wp) != {'\u0120'}:
                 for i, dgt in enumerate(list(wp.replace('\u0120', ''))):
-                    prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0) else ''
+                    prefix = '\u0120' if (wp.strip()[0] == '\u0120' and i == 0 and subword) else ''
                     toks.append(prefix + dgt)
             else:
                 toks.append(wp)
@@ -440,7 +440,7 @@ def split_digits(wps, bert_model="bert"):
                 wp = re.sub(r"[,.]", "", wp)
             if set(wp).issubset(set('0123456789▁')) and set(wp) != {'▁'}:  # Special '▁' token (not an underscore!)
                 for i, dgt in enumerate(list(wp.replace('▁', ''))):
-                    prefix = '▁' if (wp.strip()[0] == '▁' and i == 0) else ''
+                    prefix = '▁' if (wp.strip()[0] == '▁' and i == 0 and subword) else ''
                     toks.append(prefix + dgt)
             else:
                 toks.append(wp)
@@ -448,12 +448,14 @@ def split_digits(wps, bert_model="bert"):
         raise TypeError("The `bert_model` should be one of bert, roberta and albert.")
     return toks
 
-def split_digits_nonsubwords(wps: List[str]) -> List[str]:
+
+def split_digits_nonsubwords(wps):
     # Further split numeric wps - but remove "##" (the subword indicator)
     toks = []
     for wp in wps:
-        if set(wp).issubset(set('#0123456789')) and set(wp) != {'#'}:
-            for i, dgt in enumerate(list(wp.replace('#', ''))):
+        if set(wp).issubset(set('\u0120▁#0123456789')) and not set(wp).issubset({'\u0120', '▁', '#'}):
+            new_wp = wp.replace('#', '').replace('▁', '').replace('\u0120', '')
+            for i, dgt in enumerate(list(new_wp)):
                 toks.append(dgt)
         else:
             toks.append(wp)
@@ -475,15 +477,16 @@ def convert_answer_spans(spans, orig_to_tok_index, all_len, all_tokens):
     return tok_start_positions, tok_end_positions
 
 
-def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decoding_steps, indiv_digits=True, logger=None):
+def convert_examples_to_features(examples, tokenizer, tokenizer_model, max_seq_length, max_decoding_steps, indiv_digits=True, logger=None):
     """Loads a data file into a list of `InputBatch`s."""
 
     logger.info('Creating features from `examples (DropExample -> DropFeatures)`')
+    logger.info('Using [ {} ] tokenizer'.format(tokenizer_model))
     unique_id = 1000000000
     skip_count, truncate_count = 0, 0
     
-    # tokenize = (lambda s: split_digits(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
-    tokenize = (lambda s: split_digits_nonsubwords(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
+    tokenize = (lambda s: split_digits(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
+    # tokenize = (lambda s: split_digits_nonsubwords(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
 
     features, all_qp_lengths = [], []
     for (example_index, example) in enumerate(tqdm(examples)):
@@ -674,6 +677,7 @@ def main():
     features, lens = convert_examples_to_features(
         examples=examples,
         tokenizer=tokenizer,
+        tokenizer_model=model_prefix,
         max_seq_length=args.max_seq_length,
         max_decoding_steps=args.max_decoding_steps,
         indiv_digits=True,
