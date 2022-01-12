@@ -117,17 +117,22 @@ class DropDataset(TensorDataset):
     def __init__(self, args, split='train', typ=''):
         logging.info(f"Loading {split} examples and features.")
         if typ == 'numeric':
-            direc = args.examples_n_features_dir_numeric 
+            direc = args.examples_n_features_dir_numeric
         else:
             direc = args.examples_n_features_dir_syntext
-        if split == 'train':
-            examples = read_file(direc + '/train_examples.pkl')
-            drop_features = read_file(direc + '/train_features.pkl')
-        else:
-            examples = read_file(direc + '/eval_examples.pkl')
-            drop_features = read_file(direc + '/eval_features.pkl')
         
-        num_samples = len(examples)
+        if typ == 'numeric':
+            fp_prefix = 'numeric_'
+        else:
+            fp_prefix = 'textual_'
+
+        if split == 'train':
+            examples = read_file(direc + '/train_{}examples.pkl'.format(fp_prefix))
+            drop_features = read_file(direc + '/train_{}features.pkl'.format(fp_prefix))
+        else:
+            examples = read_file(direc + '/eval_{}examples.pkl'.format(fp_prefix))
+            drop_features = read_file(direc + '/eval_{}features.pkl'.format(fp_prefix))
+        
         self.max_dec_steps = len(drop_features[0].decoder_label_ids)
         
         features = []
@@ -135,8 +140,7 @@ class DropDataset(TensorDataset):
             features.append(self.convert_to_input_features(example, drop_feature))
             if split == 'train' and args.num_train_samples >= 0 and len(features) >= args.num_train_samples:
                 break
-        print()
-#         assert i == num_samples - 1
+        
         self.num_samples = len(features)
         self.seq_len = drop_features[0].max_seq_length
         self.examples = examples
