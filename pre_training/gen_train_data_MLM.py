@@ -233,7 +233,8 @@ def main():
     else:
         raise AttributeError("Specified attribute {} is not found".format(args.bert_model))
     
-    digit_tokenize = lambda s: split_digits(tokenizer.tokenize(s), bert_model=model_prefix)
+    make_subword = False
+    digit_tokenize = lambda s: split_digits(tokenizer.tokenize(s), bert_model=model_prefix, subword=make_subword)
     try:
         vocab_list = list(tokenizer.vocab.keys())
     except AttributeError:  # Caused by the missing `vocab` attribute from the updated tokenizer
