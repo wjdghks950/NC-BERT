@@ -1,4 +1,4 @@
-# Pre-training BERT on datasets in DROP format
+# Pre-training BERT on datasets in DROP format (Baseline Code for Pre-training)
 
 **Download the data + trained models** : To download our data & models and then pre-process it, run `bash download.sh`. This will also place the downloaded data inside appropriate sub-dirs.  
 
@@ -33,4 +33,3 @@ This will output `synthetic_textual_mixed_min3_max6_up0.7_train_drop_format.json
 
 Code was tested on Python 3.7.6 with `requirements.txt` containing the list of libraries.   
 
-Contact: Ankit Gupta
