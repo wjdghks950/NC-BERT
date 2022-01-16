@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=$1 python dice_finetune_on_drop.py --do_eval --do_inference --examples_n_features_dir ./data/examples_n_features/ --eval_batch_size 200 --init_weights_dir out_drop_finetune_syntext_numeric_ncmask_nodecnum --output_dir preds --surface_form localattn --percent all --min_bound 0 --max_bound 9 
