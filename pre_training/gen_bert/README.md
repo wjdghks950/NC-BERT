@@ -43,6 +43,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python train_textual_with_numeric.py  --do_
 
 **Finetuning:** 
 
+*GenBERT + Entity-Number + Type-Number + Decoder-Number Channel + LSDF*
+```
+./train_ncmask_nodecnum.sh 0
+```
+
 *GenBERT + DROP*
 ```
 CUDA_VISIBLE_DEVICES=0,1,2,3 python finetune_on_drop.py   --do_train   --do_eval  --examples_n_features_dir ./data/examples_n_features/ --train_batch_size 16 --mlm_batch_size -1 --eval_batch_size 360 --learning_rate 3e-5  --max_seq_length 512 --num_train_epochs 30.0 --warmup_proportion 0.1 --output_dir out_drop_finetune_bert --num_train_samples -1
@@ -97,4 +102,3 @@ Notes:
 5) Tensorboard log dir for a training is inside its output dir.  
 
 
-Contact: Ankit Gupta
