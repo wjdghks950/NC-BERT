@@ -1,9 +1,8 @@
 ## NC-BERT: A Numerical-Contextual BERT for Numerical Reasoning
 
-This repository contains the accompanying code for the paper:
+This repostiory contains codes for NC-BERT: Exploiting Numerical-Contextual Knowledge to Improve Numerical Reasoning in Question Answering.
 
-**"Injecting Numerical Reasoning Skills into Language Models."** Mor Geva*, Ankit Gupta* and Jonathan Berant. *In ACL, 2020*.
-[[PDF]](https://arxiv.org/pdf/2004.04487.pdf)
+It's a novel attention-masking scheme to relieve the over-reliance on the parametric knowledge, and induce the model to leverage number-related contextual knowledge in numerical reasoning over text in DROP.
 
 
 ### Structure
@@ -12,15 +11,4 @@ The repository contains:
 * Code and vocabularies for textual data generation (in `textual_data_generation` dir)
 * Code for numerical data generation (in `pre_training/numeric_data_generation` dir)   
 
-Instructions for downloading our data + models are in the README of `pre_training` dir.
-
----
-### Citation
-```
-@inproceedings{ggb2020injecting,
-  title={Injecting Numerical Reasoning Skills into Language Models},
-  author={Geva, Mor and Gupta, Ankit and Berant, Jonathan},
-  booktitle={ ACL },
-  year={ 2020 }
-}
-```
+Instructions for downloading data + models for pre-trained baseline are in the README of `pre_training` dir.
