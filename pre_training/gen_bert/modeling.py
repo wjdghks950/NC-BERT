@@ -32,6 +32,7 @@ from torch.nn import CrossEntropyLoss
 
 from allennlp.nn import util
 from allennlp.models.reading_comprehension.util import get_best_span
+from transformers import AlbertPreTrainedModel, AlbertModel
 
 from pytorch_pretrained_bert.file_utils import cached_path, WEIGHTS_NAME, CONFIG_NAME
 
@@ -330,7 +331,8 @@ class BertEmbeddings(nn.Module):
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
-    
+
+
 class BertSelfAttention(nn.Module):
     def __init__(self, config, output_attentions=False, keep_multihead_output=False):
         super(BertSelfAttention, self).__init__()
@@ -355,7 +357,8 @@ class BertSelfAttention(nn.Module):
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)  #[b, n_heads, seq_len, head_size]
+        print("x (shape): ", x.size())
+        return x.permute(0, 2, 1, 3)  # [b, n_heads, seq_len, head_size]
 
     def forward(self, query, key, value, attention_mask, head_mask=None):
         # attention mask: [b, n_heads, query_seq_len, key_seq_len] ([b,1,1,max_seq_len])
@@ -455,7 +458,7 @@ class BertAttention(nn.Module):
             return attention_output
         
         # else decoder layer
-        # resuing the attention layer and output layer for target to source attn in Decoder layer as 
+        # reusing the attention layer and output layer for target to source attn in Decoder layer as 
         # the same as that in target self attn to avoid errors while loading from pre-trained
         self_output = self.self(attention_output, memory_tensor, memory_tensor, src_attention_mask, head_mask)
         if self.output_attentions:
@@ -912,7 +915,7 @@ class BertModel(BertPreTrainedModel):
                 head_mask = head_mask.expand_as(self.config.num_hidden_layers, -1, -1, -1, -1)
             elif head_mask.dim() == 2:
                 head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # We can specify head_mask for each layer
-            head_mask = head_mask.to(dtype=next(self.parameters()).dtype) # switch to fload if need + fp16 compatibility
+            head_mask = head_mask.to(dtype=next(self.parameters()).dtype)  # switch to fload if need + fp16 compatibility
         else:
             head_mask = [None] * self.config.num_hidden_layers
 
@@ -995,7 +998,7 @@ class BertTransformer(BertPreTrainedModel):
     '''
     def __init__(self, config):
         super(BertTransformer, self).__init__(config)
-        self.bert = BertModel(config)
+        self.bert = BertModel(config, output_attentions=False)  # TODO: Set `output_attentions = True` to retrieve attention scores over the layers
         # encoder, decoder share bert - so we apply two separate layers to distinguish
         self.extra_enc_layer = BertPredictionHeadTransform(config) # extra encoder specific layer on top of bert
         self.embed = self.bert.embeddings.word_embeddings
@@ -1029,10 +1032,10 @@ class BertTransformer(BertPreTrainedModel):
     def encode(self, input_ids, token_type_ids=None, input_mask=None, random_shift=False):
         # passes the input through bert and applies the extra encoder layer
         outputs = self.bert(input_ids, token_type_ids, self.mask(input_ids, input_mask), random_shift=random_shift)
-        sequence_output, _ = outputs
+        all_attentions, sequence_output = outputs
         encoder_output = self.extra_enc_layer(sequence_output)
         pooled_encoder_output = encoder_output[:, 0]                   # [CLS] output
-        return encoder_output, pooled_encoder_output
+        return encoder_output, pooled_encoder_output, all_attentions
     
     @staticmethod
     def mask(ids, mask=None):
@@ -1061,7 +1064,7 @@ class BertTransformer(BertPreTrainedModel):
         
         # encode
         input_mask = self.mask(input_ids, input_mask)
-        encoder_output, pooled_output = self.encode(input_ids, None, input_mask, random_shift)
+        encoder_output, pooled_output, all_attentions = self.encode(input_ids, None, input_mask, random_shift)
         
         only_generative_head = False
         if answer_as_question_spans is None:
@@ -1118,15 +1121,25 @@ class BertTransformer(BertPreTrainedModel):
         return (loss, errs, dec_loss, dec_errors, span_loss, span_errors, type_loss, 
                 type_errors, type_preds)
     
+    def save_bert_attentions(self, input_ids, all_attentions):
+        dir_path = "bert_attentions"
+        id_to_attn_dict = {}
+        for batch_idx, input_id in enumerate(input_ids):
+            print("all_attentions (shape) : ", len(all_attentions), all_attentions[0].size())
+            id_to_attn_dict[batch_idx] = (input_id, all_attentions)
+        torch.save(id_to_attn_dict, os.path.join(dir_path, "id_attn.pt"))
+        exit()
     
     def inference(self, input_ids, token_type_ids=None, input_mask=None, start_tok_id=1030, max_decoding_steps=20):
         # encode
         input_mask = self.mask(input_ids, input_mask)
-        encoder_output, pooled_output = self.encode(input_ids, None, input_mask, random_shift=False)
+        encoder_output, pooled_output, all_attentions = self.encode(input_ids, None, input_mask, random_shift=False)
+
+        # self.save_bert_attentions(input_ids, all_attentions)
         
         # decode
         # max_decoding_steps: drop: 20,  numeric syn data: 11
-        start_ids = torch.zeros_like(input_ids[:,0]) + start_tok_id
+        start_ids = torch.zeros_like(input_ids[:, 0]) + start_tok_id
         dec_out_ids = start_ids if start_ids.dim() > 1 else start_ids.unsqueeze(1) # [bsz, 1]
         
         for i in range(max_decoding_steps-1): # -1 as we included end_tok in max_decoding_steps
@@ -1149,7 +1162,313 @@ class BertTransformer(BertPreTrainedModel):
         # [bsz, max_decoding_steps], [bsz], [bsz],    [bsz],     [bsz, 2]
 
 
+class AlbertMLMHead(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.LayerNorm = nn.LayerNorm(config.embedding_size)
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.dense = nn.Linear(config.hidden_size, config.embedding_size)
+        self.decoder = nn.Linear(config.embedding_size, config.vocab_size)
+        self.activation = ACT2FN[config.hidden_act]
+        self.decoder.bias = self.bias
+
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.activation(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states)
+        hidden_states = self.decoder(hidden_states)
+
+        prediction_scores = hidden_states
+
+        return prediction_scores
+
+    def _tie_weights(self):
+        # To tie those two weights if they get disconnected (on TPU or when the bias is resized)
+        self.bias = self.decoder.bias
+
+
+class AlbertSOPHead(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.dropout = nn.Dropout(config.classifier_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+    def forward(self, pooled_output):
+        dropout_pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(dropout_pooled_output)
+        return logits
+
+
+class AlbertForPreTraining(AlbertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.albert = AlbertModel(config)
+        self.predictions = AlbertMLMHead(config)
+        self.sop_classifier = AlbertSOPHead(config)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_output_embeddings(self):
+        return self.predictions.decoder
+
+    def set_output_embeddings(self, new_embeddings):
+        self.predictions.decoder = new_embeddings
+
+    def get_input_embeddings(self):
+        return self.albert.embeddings.word_embeddings
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        sentence_order_label=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ..., config.vocab_size]` (see `input_ids` docstring) Tokens with indices set to `-100` are ignored
+            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`
+        sentence_order_label (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the next sequence prediction (classification) loss. Input should be a sequence pair
+            (see `input_ids` docstring) Indices should be in `[0, 1]`. `0` indicates original order (sequence
+            A, then sequence B), `1` indicates switched order (sequence B, then sequence A).
+        Returns:
+        Example:
+        ```python
+        >>> from transformers import AlbertTokenizer, AlbertForPreTraining
+        >>> import torch
+        >>> tokenizer = AlbertTokenizer.from_pretrained('albert-base-v2')
+        >>> model = AlbertForPreTraining.from_pretrained('albert-base-v2')
+        >>> input_ids = torch.tensor(tokenizer.encode("Hello, my dog is cute", add_special_tokens=True)).unsqueeze(0)  # Batch size 1
+        >>> outputs = model(input_ids)
+        >>> prediction_logits = outputs.prediction_logits
+        >>> sop_logits = outputs.sop_logits
+        ```"""
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.albert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output, pooled_output = outputs[:2]
+
+        prediction_scores = self.predictions(sequence_output)
+        sop_scores = self.sop_classifier(pooled_output)
+
+        total_loss = None
+        if labels is not None and sentence_order_label is not None:
+            loss_fct = CrossEntropyLoss()
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+            sentence_order_loss = loss_fct(sop_scores.view(-1, 2), sentence_order_label.view(-1))
+            total_loss = masked_lm_loss + sentence_order_loss
+
+        if not return_dict:
+            output = (prediction_scores, sop_scores) + outputs[2:]
+            return ((total_loss,) + output) if total_loss is not None else output
+
+        return AlbertForPreTrainingOutput(
+            loss=total_loss,
+            prediction_logits=prediction_scores,
+            sop_logits=sop_scores,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class AlbertTransformer(AlbertPreTrainedModel):
+    '''Albert encoder + Albert decoder with extra mlm, span extraction, etc heads.
+    (including the sentence order pred (SOP) of the Albert pre-training task)
+    TODO: for exractive QA, include BIO tagging head.
+    '''
+    def __init__(self, config):
+        super(AlbertTransformer, self).__init__(config)
+        self.bert = AlbertModel(config, output_attentions=False)  # Set `output_attentions = True` to retrieve attention scores over the layers
+        # encoder, decoder share bert - so we apply two separate layers to distinguish
+        self.extra_enc_layer = BertPredictionHeadTransform(config) # extra encoder specific layer on top of bert
+        self.embed = self.bert.embeddings.word_embeddings
+        self.qa_head = SpanExtractionHead(config)                  # for span exraction
+        self.extra_dec_layer = BertPredictionHeadTransform(config) # extra decoder specific layer on top of bert
+        self.head_type = nn.Linear(config.hidden_size, 2)          # to decide which head to use: decoder / extract span
+        self.dec_head = SimpleMLMHead(self.embed)                  # for decoding the decoder output
+        self.cls = BertOnlyMLMHead(config, self.embed.weight)      # for mlm task: extra linear + transform 
+                                                                   # as in orig bert pre-training 
+        self.apply(self.init_bert_weights)
+        # Module.apply() applies init_bert_weights recursively on all submodules.
+        # In from_pretrained() code, first the model constructor is called and then model weights are loaded from the file
+        
+    def mlm_task(self, input_ids, token_type_ids=None, input_mask=None, 
+                 masked_lm_labels=None, random_shift=False, ignore_idx=0):
+        # this task uses bert output and not the encoder output
+        # implementation is same as orig bert
+        input_mask = self.mask(input_ids)
+        sequence_output, _ = self.bert(input_ids, token_type_ids, input_mask)
+        prediction_scores = self.cls(sequence_output)
+        preds = prediction_scores.argmax(dim=-1)                       # [bsz, seq_len]
+        
+        if masked_lm_labels is not None:
+            errors = ((preds != masked_lm_labels) & (masked_lm_labels != ignore_idx)).sum(dim=-1)
+            loss_fct = CrossEntropyLoss(ignore_index=ignore_idx)
+            prediction_scores = prediction_scores.view(-1, self.config.vocab_size)
+            masked_lm_loss = loss_fct(prediction_scores, masked_lm_labels.view(-1))
+            return masked_lm_loss, errors
+        return preds
+
+    def sop_task(self, input_ids, token_type_ids=None, input_mask=None, 
+                 sop_lm_labels=None, random_shift=False, ignore_idx=0):
+        pass
+
+    def encode(self, input_ids, token_type_ids=None, input_mask=None, random_shift=False):
+        # passes the input through bert and applies the extra encoder layer
+        outputs = self.bert(input_ids, token_type_ids, self.mask(input_ids, input_mask), random_shift=random_shift)
+        all_attentions, sequence_output = outputs
+        encoder_output = self.extra_enc_layer(sequence_output)
+        pooled_encoder_output = encoder_output[:, 0]                   # [CLS] output
+        return encoder_output, pooled_encoder_output, all_attentions
     
+    @staticmethod
+    def mask(ids, mask=None):
+        # assumes pad id == 0
+        return (ids != 0) if mask is None else mask.bool()
+    
+    @staticmethod
+    def get1d(x):
+        # multi-gpu might add an extra dim
+        if x is not None and len(x.size()) > 1:
+            return x.squeeze(-1)
+        return x
+    
+    def forward(self, input_ids, token_type_ids=None, input_mask=None, random_shift=False, 
+                target_ids=None, target_mask=None, answer_as_question_spans=None, answer_as_passage_spans=None,
+                head_type=None, ignore_idx=0, task='', max_decoding_steps=20):
+        # answer_as_question_spans: [bsz, # answers, 2], -1: ignore
+        # head_type: [bsz]  0 for decoder, 1 for span-extraction, -1: ignore 
+        # segment_ids are only used for question, passage mask computation and not for encoding
+        
+        if task.lower() == 'mlm':
+            return self.mlm_task(input_ids, None, input_mask, target_ids, ignore_idx=ignore_idx)
+        
+        if task.lower() == 'inference':
+            return self.inference(input_ids, token_type_ids, input_mask, max_decoding_steps=max_decoding_steps)
+        
+        # encode
+        input_mask = self.mask(input_ids, input_mask)
+        encoder_output, pooled_output, all_attentions = self.encode(input_ids, None, input_mask, random_shift)
+        
+        only_generative_head = False
+        if answer_as_question_spans is None:
+            head_type, only_generative_head = torch.zeros_like(input_ids[:, 0]), True
+        
+        # decode
+        target_ids_in, target_ids_out = target_ids[:, :-1], target_ids[:, 1:]
+        # subsequent mask is applied inside self.bert
+        dec_out, _ = self.bert(target_ids_in, attention_mask=self.mask(target_ids_in), 
+                               memory_tensor=encoder_output, src_attention_mask=input_mask)
+        
+        # apply extra dec layer and compute the decoder losses wrt left-shifted target seq
+        if only_generative_head:
+            dec_loss, dec_errors = self.dec_head(self.extra_dec_layer(dec_out), target_ids_out,
+                                                 ignore_idx=0)
+            loss = dec_loss     # already mean reduced
+            errs = dec_errors > 0
+        else:
+            # generative head can always generate the ans
+            dec_nlls, dec_errors = self.dec_head(self.extra_dec_layer(dec_out), target_ids_out, 
+                                                 ignore_idx=0, sample_wise=True)
+            # dec_nlls, dec_errors : [bsz], [bsz]
+            dec_log_probs = - dec_nlls
+            dec_loss = dec_nlls.mean()
+        
+        if not only_generative_head:
+            # extractive answer span: for samples without a valid span span_errors is 1
+            span_log_probs, span_errors, span_loss, start_preds, end_preds = self.qa_head(
+                encoder_output, input_mask, token_type_ids, answer_as_question_spans, answer_as_passage_spans)
+            # span_errors, start_preds, end_preds : [bsz]
+            # for samples without a valid gold span, log prob is a large -ve val,
+            # this'll drive the head_type to choose the generative head.
+            
+            # answer head type
+            type_logits = self.head_type(pooled_output)           # [bsz, 2]
+            type_log_probs = nn.LogSoftmax(dim=-1)(type_logits)   # [bsz, 2]
+            type_preds = type_logits.argmax(dim=-1)               # [bsz] 
+            # compute loss for samples with head_type supervision
+            head_type = self.get1d(head_type)                     # [bsz]
+            type_loss = CrossEntropyLoss(ignore_index=-1)(type_logits, head_type) 
+            type_errors = ((type_preds != head_type) & (head_type != -1))  # [bsz]
+            
+            # marginalize over head types
+            log_probs_list = [dec_log_probs + type_log_probs[:,0], span_log_probs + type_log_probs[:,1]]
+            all_log_probs = torch.stack(log_probs_list, dim=-1)
+            marginal_log_probs = torch.logsumexp(all_log_probs, -1)
+            loss = - marginal_log_probs.mean()
+            errs = torch.gather(torch.stack([dec_errors > 0, span_errors], dim=-1), 
+                                1, type_preds.unsqueeze(1)).squeeze(1)   # [bsz]
+        else:
+            type_preds = torch.zeros_like(dec_errors)     # [bsz]
+            span_loss, span_errors, type_loss, type_errors = None, None, None, None
+        
+        return (loss, errs, dec_loss, dec_errors, span_loss, span_errors, type_loss, 
+                type_errors, type_preds)
+    
+    def save_bert_attentions(self, input_ids, all_attentions):
+        dir_path = "bert_attentions"
+        id_to_attn_dict = {}
+        for batch_idx, input_id in enumerate(input_ids):
+            print("all_attentions (shape) : ", len(all_attentions), all_attentions[0].size())
+            id_to_attn_dict[batch_idx] = (input_id, all_attentions)
+        torch.save(id_to_attn_dict, os.path.join(dir_path, "id_attn.pt"))
+        exit()
+    
+    def inference(self, input_ids, token_type_ids=None, input_mask=None, start_tok_id=1030, max_decoding_steps=20):
+        # encode
+        input_mask = self.mask(input_ids, input_mask)
+        encoder_output, pooled_output, all_attentions = self.encode(input_ids, None, input_mask, random_shift=False)
+
+        # self.save_bert_attentions(input_ids, all_attentions)
+        
+        # decode
+        # max_decoding_steps: drop: 20,  numeric syn data: 11
+        start_ids = torch.zeros_like(input_ids[:, 0]) + start_tok_id
+        dec_out_ids = start_ids if start_ids.dim() > 1 else start_ids.unsqueeze(1) # [bsz, 1]
+        
+        for i in range(max_decoding_steps-1): # -1 as we included end_tok in max_decoding_steps
+            # subsequent mask is applied inside self.bert
+            dec_out, _ = self.bert(dec_out_ids, attention_mask=self.mask(dec_out_ids),
+                                   memory_tensor=encoder_output, src_attention_mask=input_mask)
+            # apply extra dec layer and extract the last time step pred
+            dec_preds_i = self.dec_head(self.extra_dec_layer(dec_out))[:, -1:]
+            # update decoded seq
+            dec_out_ids = torch.cat((dec_out_ids, dec_preds_i), dim=-1)  # [bsz, i+2]
+            
+        # extractive answer span: only relevant errs are included in span_errors
+        start_preds, end_preds = self.qa_head(encoder_output, input_mask, token_type_ids=token_type_ids)
+        
+        # answer head type
+        type_logits = self.head_type(pooled_output)  # [bsz, 2]
+        type_preds = type_logits.argmax(dim=-1)
+        
+        return dec_out_ids, type_preds, start_preds, end_preds, type_logits 
+        # [bsz, max_decoding_steps], [bsz], [bsz],    [bsz],     [bsz, 2]
+
+
 class SpanExtractionHead(nn.Module):
     '''Span extraction head for QA. Mostly borrowed from https://github.com/raylin1000/drop-bert/blob/master/drop_bert/augmented_bert.py .
     '''
