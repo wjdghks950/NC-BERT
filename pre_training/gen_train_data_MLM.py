@@ -287,10 +287,13 @@ def create_instances_from_document(
     current_chunk = []  # `current_chunk` is a list of sentences
     current_length = 0
     i = 0
-
     while i < len(document):
         segment = document[i]
         if len(segment) >= 1:
+            # '■' is a delimiter between paragraphs
+            # (ref: https://github.com/ag1988/injecting_numeracy/tree/master/pre_training)
+            if '■' in segment:
+                segment = ["■"]
             current_chunk.append(segment)  # append to sents to current_chunk until target_seq_length
         current_length += len(segment)
 
@@ -305,7 +308,7 @@ def create_instances_from_document(
                 # `a_end` is how many segments from `current_chunk` should be assigned to `A` (the first sentence)
                 a_end = 1
                 if len(current_chunk) >= 2:
-                    a_end = randint(1, len(current_chunk) - 1)
+                    a_end = randint(1, len(current_chunk))
 
                 tokens_a = []
                 for j in range(a_end):
