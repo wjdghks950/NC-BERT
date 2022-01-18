@@ -308,7 +308,7 @@ def create_instances_from_document(
                 # `a_end` is how many segments from `current_chunk` should be assigned to `A` (the first sentence)
                 a_end = 1
                 if len(current_chunk) >= 2:
-                    a_end = randint(1, len(current_chunk))
+                    a_end = randint(1, len(current_chunk) - 1)
 
                 tokens_a = []
                 for j in range(a_end):
@@ -333,18 +333,31 @@ def create_instances_from_document(
                     random_document = all_documents[random_document_index]
                     random_start = randint(0, len(random_document) - 1)
                     for j in range(random_start, len(random_document)):
-                        tokens_b.extend(random_document[j])
+                        if len(random_document[j]) >= 1:
+                            tokens_b.extend(random_document[j])
                         if len(tokens_b) >= target_b_length:
                             break
+                    
+                    # Make sure that `tokens_b` is not empty from selecting empty chunks in `random_document`
+                    if len(tokens_b) < 1:
+                        for _ in range(10):
+                            random_start = randint(0, len(random_document) - 1)
+                            if len(random_document[random_start]) >= 1:
+                                for j in range(random_start, len(random_document)):
+                                    tokens_b.extend(random_document[j])
+                                    if len(tokens_b) >= target_b_length:
+                                        break
+                                break
+
                     # "Return" ("put the unused segments back") the unused segments
                     num_unused_segments = len(current_chunk) - a_end
                     i -= num_unused_segments
                 elif not random_next_sentence and random() < 0.5:
                     case = 2
                     is_random_next = True
-                    # TODO: What if the a_end - len(current_chunk) <= 1? (i.e., no leftover sentence to swap)
-                    # Swap the second to last segment and the last segment  # TODO: Execute and test this code segment
-                    if a_end - len(current_chunk) <= 1:
+                    # If the a_end - len(current_chunk) <= 1 (i.e., no leftover sentence to swap)
+                    # Swap the second to last segment and the last segment
+                    if a_end - len(current_chunk) <= 1 and len(current_chunk) > 2:
                         current_chunk[-2], current_chunk[-1] = current_chunk[-1], current_chunk[-2]
                         for j in range(a_end - 1):
                             tokens_a.extend(current_chunk[j])
