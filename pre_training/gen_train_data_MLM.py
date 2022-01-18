@@ -264,8 +264,8 @@ def create_instances_from_document(
     random_next_sentence = True  # FLAG for choosing random sentences from another document (or just swap with the subsequent sentence) for sop
     document = all_documents[document_index]
     # document is a list of toknized sents
-    # Account for [CLS], [SEP]
-    max_num_tokens = max_seq_length - 2
+    # Account for [CLS], [SEP], [SEP]
+    max_num_tokens = max_seq_length - 3
 
     # We *usually* want to fill up the entire sequence since we are padding
     # to `max_seq_length` anyways, so short sequences are generally wasted
@@ -284,15 +284,21 @@ def create_instances_from_document(
     # segments "A" and "B" based on the actual "sentences" provided by the user
     # input.
     instances = []
-    current_chunk = []  # `current_chunk` is a sentence
+    current_chunk = []  # `current_chunk` is a list of sentences
     current_length = 0
     i = 0
+
     while i < len(document):
         segment = document[i]
-        current_chunk.append(segment)  # append to sents to current_chunk until target_seq_length
+        if len(segment) >= 1:
+            current_chunk.append(segment)  # append to sents to current_chunk until target_seq_length
         current_length += len(segment)
 
-        target_seq_length = current_length + 1 if target_seq_length <= 512 else max_seq_length
+        # print("current doc: ", document)
+        if random() < 0.5:
+            random_next_sentence = True
+        else:
+            random_next_sentence = False
 
         if i == len(document) - 1 or current_length >= target_seq_length:
             if current_chunk:
@@ -300,97 +306,118 @@ def create_instances_from_document(
                 a_end = 1
                 if len(current_chunk) >= 2:
                     a_end = randint(1, len(current_chunk) - 1)
-            
-            tokens_a = []
-            for j in range(a_end):
-                tokens_a.extend(current_chunk[j])
-            
-            tokens_b = []
-            # `is_random_next` determines the label for sentence order prediction (sop)
-            # if `is_random_next = False`, sop = 0
-            # else 1
-            is_random_next = False
-            if len(current_chunk) == 1 or (random_next_sentence and random() < 0.5):
-                is_random_next = True
-                target_b_length = target_seq_length - len(tokens_a)
 
-                # If the corpus size is large enough, the iteration will not go for more than 10 iters
-                if len(all_documents) > 1:
-                    for _ in range(10):
-                        random_document_index = randint(0, len(all_documents) - 1)
-                        if random_document_index != document_index:
-                            break
-                
-                random_document = all_documents[random_document_index]
-                random_start = randint(0, len(random_document) - 1)
-                for j in range(random_start, len(random_document)):
-                    tokens_b.extend(random_document[j])
-                    if len(tokens_b) >= target_b_length:
-                        break
-                # "Return" ("put the unused segments back") the unused segments
-                num_unused_segments = len(current_chunk) - a_end
-                i -= num_unused_segments
-            elif not random_next_sentence and random() < 0.5:
-                is_random_next = True
-                for j in range(a_end, len(current_chunk)):
-                    tokens_b.extend(current_chunk[j])
-                # In this case, simply swap `tokens_a` and `tokens_b`
-                # This leverages the immediately following sentence (i.e., text chunks)
-                tokens_a, tokens_b = tokens_b, tokens_a
-            else:
-                # Actual next sentence
+                tokens_a = []
+                for j in range(a_end):
+                    tokens_a.extend(current_chunk[j])
+            
+                tokens_b = []
+                # `is_random_next` determines the label for sentence order prediction (sop)
+                case = 0
                 is_random_next = False
-                for j in range(a_end, len(current_chunk)):
-                    tokens_b.extend(current_chunk[j])
-            truncate_seq_pair(tokens_a, tokens_b, max_num_tokens)
+                if len(current_chunk) == 1 or (random_next_sentence and random() < 0.5):
+                    case = 1
+                    is_random_next = True
+                    target_b_length = target_seq_length - len(tokens_a)
 
-            assert len(tokens_a) >= 1
-            assert len(tokens_b) >= 1
+                    # If the corpus size is large enough, the iteration will not go for more than 10 iters
+                    if len(all_documents) > 1:
+                        for _ in range(10):
+                            random_document_index = randint(0, len(all_documents) - 1)
+                            if random_document_index != document_index and len(all_documents[random_document_index]) > 1:
+                                break
+                    
+                    random_document = all_documents[random_document_index]
+                    random_start = randint(0, len(random_document) - 1)
+                    for j in range(random_start, len(random_document)):
+                        tokens_b.extend(random_document[j])
+                        if len(tokens_b) >= target_b_length:
+                            break
+                    # "Return" ("put the unused segments back") the unused segments
+                    num_unused_segments = len(current_chunk) - a_end
+                    i -= num_unused_segments
+                elif not random_next_sentence and random() < 0.5:
+                    case = 2
+                    is_random_next = True
+                    # TODO: What if the a_end - len(current_chunk) <= 1? (i.e., no leftover sentence to swap)
+                    # Swap the second to last segment and the last segment  # TODO: Execute and test this code segment
+                    if a_end - len(current_chunk) <= 1:
+                        current_chunk[-2], current_chunk[-1] = current_chunk[-1], current_chunk[-2]
+                        for j in range(a_end - 1):
+                            tokens_a.extend(current_chunk[j])
+                        tokens_b.extend(current_chunk.pop())
+                    else:
+                        for j in range(a_end, len(current_chunk)):
+                            tokens_b.extend(current_chunk[j])
 
-            tokens = []
-            segment_ids = []
-            tokens.append("[CLS]")
-            segment_ids.append(0)
-            for token in tokens_a:
-                tokens.append(token)
+                    # In this case, simply swap `tokens_a` and `tokens_b`
+                    # This leverages the immediately following sentence (i.e., text chunks)
+                    tokens_a, tokens_b = tokens_b, tokens_a
+                else:
+                    case = 3
+                    # Actual next sentence
+                    is_random_next = False
+                    for j in range(a_end, len(current_chunk)):
+                        tokens_b.extend(current_chunk[j])
+                truncate_seq_pair(tokens_a, tokens_b, max_num_tokens)
+
+                try:
+                    assert len(tokens_a) >= 1
+                    assert len(tokens_b) >= 1
+                except AssertionError as e:
+                    print("AssertionError: {}".format(e))
+                    print("random_next_sentence : {}".format(random_next_sentence))
+                    print("tokens_a : {}".format(tokens_a))
+                    print("tokens_b : {}".format(tokens_b))
+                    print("current_chunk : {}".format(current_chunk))
+                    print("case : {}".format(str(case)))
+                    print("\n{}".format(all_documents[random_document_index]))
+                    exit()
+
+                tokens = []
+                segment_ids = []
+                tokens.append("[CLS]")
+                segment_ids.append(0)
+                for token in tokens_a:
+                    tokens.append(token)
+                    segment_ids.append(0)
+
+                tokens.append("[SEP]")
                 segment_ids.append(0)
 
-            tokens.append("[SEP]")
-            segment_ids.append(0)
+                for token in tokens_b:
+                    tokens.append(token)
+                    segment_ids.append(1)
 
-            for token in tokens_b:
-                tokens.append(token)
+                tokens.append("[SEP]")
                 segment_ids.append(1)
 
-            tokens.append("[SEP]")
-            segment_ids.append(1)
+                if model_prefix == "bert":
+                    tokens, masked_lm_positions, masked_lm_labels = create_masked_lm_predictions_bert(
+                        tokens, masked_lm_prob, max_predictions_per_seq, whole_word_mask, vocab_list)
+                    instance = {
+                        "tokens": tokens,
+                        "segment_ids": segment_ids,
+                        "masked_lm_positions": masked_lm_positions,
+                        "masked_lm_labels": masked_lm_labels}
 
-            if model_prefix == "bert":
-                tokens, masked_lm_positions, masked_lm_labels = create_masked_lm_predictions_bert(
-                    tokens, masked_lm_prob, max_predictions_per_seq, whole_word_mask, vocab_list)
-                instance = {
-                    "tokens": tokens,
-                    "segment_ids": segment_ids,
-                    "masked_lm_positions": masked_lm_positions,
-                    "masked_lm_labels": masked_lm_labels}
+                elif model_prefix == "albert":
+                    tokens, masked_lm_positions, masked_lm_labels, token_boundary = create_masked_lm_predictions_albert(
+                        tokens, masked_lm_prob, max_predictions_per_seq, vocab_list
+                    )
+                    # Label for sentence order prediction (sop) in Albert
+                    # `sop_label = 1` the sentence order is reversed.
+                    # `sop_label = 0` the sentence order is unchanged.
+                    sop_label = 1 if is_random_next else 0
 
-            elif model_prefix == "albert":
-                tokens, masked_lm_positions, masked_lm_labels, token_boundary = create_masked_lm_predictions_albert(
-                    tokens, masked_lm_prob, max_predictions_per_seq, vocab_list
-                )
-                # Label for sentence order prediction (sop) in Albert
-                # `sop_label = 1` the sentence order is reversed.
-                # `sop_label = 0` the sentence order is unchanged.
-                sop_label = 1 if is_random_next else 0
+                    instance = {
+                        "tokens": tokens,
+                        "segment_ids": segment_ids,
+                        "masked_lm_positions": masked_lm_positions,
+                        "masked_lm_labels": masked_lm_labels,
+                        "sop_label": sop_label}
 
-                instance = {
-                    "tokens": tokens,
-                    "segment_ids": segment_ids,
-                    "masked_lm_positions": masked_lm_positions,
-                    "masked_lm_labels": masked_lm_labels,
-                    "sop_label": sop_label}
-
-            instances.append(instance)
+                instances.append(instance)
             # reset and start new chunk
             current_chunk = []
             current_length = 0
