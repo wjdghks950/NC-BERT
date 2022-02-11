@@ -1206,8 +1206,8 @@ class AlbertTransformer(AlbertPreTrainedModel):
         # this task uses bert output and not the encoder output
         # implementation is same as orig bert
         input_mask = self.mask(input_ids)
-        sequence_output, _ = self.albert(input_ids, input_mask, token_type_ids)
-        prediction_scores = self.cls(sequence_output)
+        outputs = self.albert(input_ids, input_mask, token_type_ids)
+        prediction_scores = self.cls(outputs.last_hidden_state)
         preds = prediction_scores.argmax(dim=-1)                       # [bsz, seq_len]
         
         if masked_lm_labels is not None:
@@ -1222,8 +1222,8 @@ class AlbertTransformer(AlbertPreTrainedModel):
                  sop_labels=None, random_shift=False, ignore_idx=-1):
         # SOP task takes the encoded output straight from albert
         input_mask = self.mask(input_ids)
-        sequence_output, _ = self.albert(input_ids, input_mask, token_type_ids)
-        prediction_scores = self.cls_sop(sequence_output)
+        outputs _ = self.albert(input_ids, input_mask, token_type_ids)
+        prediction_scores = self.cls_sop(outputs.last_hidden_state)
         preds = prediction_scores.argmax(dim=-1)
         
         if sop_labels is not None:
@@ -1237,8 +1237,8 @@ class AlbertTransformer(AlbertPreTrainedModel):
         outputs = self.albert(input_ids, self.mask(input_ids, input_mask), token_type_ids)  # , random_shift=random_shift)
         encoder_output = self.extra_enc_layer(outputs.last_hidden_state)
         pooled_encoder_output = encoder_output[:, 0]                   # [CLS] output
-        return encoder_output, pooled_encoder_output, all_attentions
-    
+        return encoder_output, pooled_encoder_output, outputs.attentions
+
     @staticmethod
     def mask(ids, mask=None):
         # assumes pad id == 0
