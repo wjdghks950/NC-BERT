@@ -24,6 +24,8 @@ import math
 import os
 import sys
 from io import open
+from typing import Optional, Tuple
+from dataclasses import dataclass
 import numpy as np
 
 import torch
@@ -33,6 +35,7 @@ from torch.nn import CrossEntropyLoss
 from allennlp.nn import util
 from allennlp.models.reading_comprehension.util import get_best_span
 from transformers import AlbertPreTrainedModel, AlbertModel
+from transformers.file_utils import ModelOutput
 
 from pytorch_pretrained_bert.file_utils import cached_path, WEIGHTS_NAME, CONFIG_NAME
 
@@ -172,11 +175,19 @@ def gelu(x):
     return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
+def gelu_new(x):
+    """
+    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT). Also see
+    the Gaussian Error Linear Units paper: https://arxiv.org/abs/1606.08415
+    """
+    return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+
+
 def swish(x):
     return x * torch.sigmoid(x)
 
 
-ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
+ACT2FN = {"gelu": gelu, "gelu_new": gelu_new, "relu": torch.nn.functional.relu, "swish": swish}
 
 
 class BertConfig(object):
@@ -570,6 +581,7 @@ class BertPredictionHeadTransform(nn.Module):
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, hidden_states):
+        print("** hidden_states: ", hidden_states)  # TODO: hidden_states turns out as `str`
         hidden_states = self.dense(hidden_states)
         hidden_states = self.transform_act_fn(hidden_states)
         hidden_states = self.LayerNorm(hidden_states)
@@ -1162,156 +1174,30 @@ class BertTransformer(BertPreTrainedModel):
         # [bsz, max_decoding_steps], [bsz], [bsz],    [bsz],     [bsz, 2]
 
 
-class AlbertMLMHead(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-
-        self.LayerNorm = nn.LayerNorm(config.embedding_size)
-        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
-        self.dense = nn.Linear(config.hidden_size, config.embedding_size)
-        self.decoder = nn.Linear(config.embedding_size, config.vocab_size)
-        self.activation = ACT2FN[config.hidden_act]
-        self.decoder.bias = self.bias
-
-    def forward(self, hidden_states):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.activation(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states)
-        hidden_states = self.decoder(hidden_states)
-
-        prediction_scores = hidden_states
-
-        return prediction_scores
-
-    def _tie_weights(self):
-        # To tie those two weights if they get disconnected (on TPU or when the bias is resized)
-        self.bias = self.decoder.bias
-
-
-class AlbertSOPHead(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-
-        self.dropout = nn.Dropout(config.classifier_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-
-    def forward(self, pooled_output):
-        dropout_pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(dropout_pooled_output)
-        return logits
-
-
-class AlbertForPreTraining(AlbertPreTrainedModel):
-    def __init__(self, config):
-        super().__init__(config)
-
-        self.albert = AlbertModel(config)
-        self.predictions = AlbertMLMHead(config)
-        self.sop_classifier = AlbertSOPHead(config)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_output_embeddings(self):
-        return self.predictions.decoder
-
-    def set_output_embeddings(self, new_embeddings):
-        self.predictions.decoder = new_embeddings
-
-    def get_input_embeddings(self):
-        return self.albert.embeddings.word_embeddings
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        labels=None,
-        sentence_order_label=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ..., config.vocab_size]` (see `input_ids` docstring) Tokens with indices set to `-100` are ignored
-            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`
-        sentence_order_label (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for computing the next sequence prediction (classification) loss. Input should be a sequence pair
-            (see `input_ids` docstring) Indices should be in `[0, 1]`. `0` indicates original order (sequence
-            A, then sequence B), `1` indicates switched order (sequence B, then sequence A).
-        Returns:
-        Example:
-        ```python
-        >>> from transformers import AlbertTokenizer, AlbertForPreTraining
-        >>> import torch
-        >>> tokenizer = AlbertTokenizer.from_pretrained('albert-base-v2')
-        >>> model = AlbertForPreTraining.from_pretrained('albert-base-v2')
-        >>> input_ids = torch.tensor(tokenizer.encode("Hello, my dog is cute", add_special_tokens=True)).unsqueeze(0)  # Batch size 1
-        >>> outputs = model(input_ids)
-        >>> prediction_logits = outputs.prediction_logits
-        >>> sop_logits = outputs.sop_logits
-        ```"""
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.albert(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        sequence_output, pooled_output = outputs[:2]
-
-        prediction_scores = self.predictions(sequence_output)
-        sop_scores = self.sop_classifier(pooled_output)
-
-        total_loss = None
-        if labels is not None and sentence_order_label is not None:
-            loss_fct = CrossEntropyLoss()
-            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
-            sentence_order_loss = loss_fct(sop_scores.view(-1, 2), sentence_order_label.view(-1))
-            total_loss = masked_lm_loss + sentence_order_loss
-
-        if not return_dict:
-            output = (prediction_scores, sop_scores) + outputs[2:]
-            return ((total_loss,) + output) if total_loss is not None else output
-
-        return AlbertForPreTrainingOutput(
-            loss=total_loss,
-            prediction_logits=prediction_scores,
-            sop_logits=sop_scores,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+'''
+From here onwards, implementation for AlbertPreTraining
+'''
 
 
 class AlbertTransformer(AlbertPreTrainedModel):
-    '''Albert encoder + Albert decoder with extra mlm, span extraction, etc heads.
+    '''Albert encoder + Albert decoder with extra mlm, sop, span extraction, other heads.
     (including the sentence order pred (SOP) of the Albert pre-training task)
     TODO: for exractive QA, include BIO tagging head.
     '''
     def __init__(self, config):
         super(AlbertTransformer, self).__init__(config)
-        self.bert = AlbertModel(config, output_attentions=False)  # Set `output_attentions = True` to retrieve attention scores over the layers
+        self.albert = AlbertModel(config)  # Set `output_attentions = True` to retrieve attention scores over the layers
         # encoder, decoder share bert - so we apply two separate layers to distinguish
         self.extra_enc_layer = BertPredictionHeadTransform(config) # extra encoder specific layer on top of bert
-        self.embed = self.bert.embeddings.word_embeddings
+        self.embed = self.albert.embeddings.word_embeddings
         self.qa_head = SpanExtractionHead(config)                  # for span exraction
         self.extra_dec_layer = BertPredictionHeadTransform(config) # extra decoder specific layer on top of bert
         self.head_type = nn.Linear(config.hidden_size, 2)          # to decide which head to use: decoder / extract span
         self.dec_head = SimpleMLMHead(self.embed)                  # for decoding the decoder output
         self.cls = BertOnlyMLMHead(config, self.embed.weight)      # for mlm task: extra linear + transform 
                                                                    # as in orig bert pre-training 
-        self.apply(self.init_bert_weights)
+        self.cls_sop = BertOnlyNSPHead(config)
+        self.post_init()
         # Module.apply() applies init_bert_weights recursively on all submodules.
         # In from_pretrained() code, first the model constructor is called and then model weights are loaded from the file
         
@@ -1320,7 +1206,7 @@ class AlbertTransformer(AlbertPreTrainedModel):
         # this task uses bert output and not the encoder output
         # implementation is same as orig bert
         input_mask = self.mask(input_ids)
-        sequence_output, _ = self.bert(input_ids, token_type_ids, input_mask)
+        sequence_output, _ = self.albert(input_ids, input_mask, token_type_ids)
         prediction_scores = self.cls(sequence_output)
         preds = prediction_scores.argmax(dim=-1)                       # [bsz, seq_len]
         
@@ -1333,14 +1219,23 @@ class AlbertTransformer(AlbertPreTrainedModel):
         return preds
 
     def sop_task(self, input_ids, token_type_ids=None, input_mask=None, 
-                 sop_lm_labels=None, random_shift=False, ignore_idx=0):
-        pass
+                 sop_labels=None, random_shift=False, ignore_idx=-1):
+        # SOP task takes the encoded output straight from albert
+        input_mask = self.mask(input_ids)
+        sequence_output, _ = self.albert(input_ids, input_mask, token_type_ids)
+        prediction_scores = self.cls_sop(sequence_output)
+        preds = prediction_scores.argmax(dim=-1)
+        
+        if sop_labels is not None:
+            loss_fct = CrossEntropyLoss(ignore_index=ignore_idx)
+            sop_loss = loss_fct(prediction_scores, sop_labels)
+            return sop_loss, preds
+        return preds
 
     def encode(self, input_ids, token_type_ids=None, input_mask=None, random_shift=False):
         # passes the input through bert and applies the extra encoder layer
-        outputs = self.bert(input_ids, token_type_ids, self.mask(input_ids, input_mask), random_shift=random_shift)
-        all_attentions, sequence_output = outputs
-        encoder_output = self.extra_enc_layer(sequence_output)
+        outputs = self.albert(input_ids, self.mask(input_ids, input_mask), token_type_ids)  # , random_shift=random_shift)
+        encoder_output = self.extra_enc_layer(outputs.last_hidden_state)
         pooled_encoder_output = encoder_output[:, 0]                   # [CLS] output
         return encoder_output, pooled_encoder_output, all_attentions
     
@@ -1357,7 +1252,7 @@ class AlbertTransformer(AlbertPreTrainedModel):
         return x
     
     def forward(self, input_ids, token_type_ids=None, input_mask=None, random_shift=False, 
-                target_ids=None, target_mask=None, answer_as_question_spans=None, answer_as_passage_spans=None,
+                target_ids=None, target_mask=None, sop_labels=None, answer_as_question_spans=None, answer_as_passage_spans=None,
                 head_type=None, ignore_idx=0, task='', max_decoding_steps=20):
         # answer_as_question_spans: [bsz, # answers, 2], -1: ignore
         # head_type: [bsz]  0 for decoder, 1 for span-extraction, -1: ignore 
@@ -1365,6 +1260,10 @@ class AlbertTransformer(AlbertPreTrainedModel):
         
         if task.lower() == 'mlm':
             return self.mlm_task(input_ids, None, input_mask, target_ids, ignore_idx=ignore_idx)
+
+        if task.lower() == 'sop':
+            ignore_idx = -1
+            return self.sop_task(input_ids, None, input_mask, target_ids, ignore_idx=ignore_idx)
         
         if task.lower() == 'inference':
             return self.inference(input_ids, token_type_ids, input_mask, max_decoding_steps=max_decoding_steps)
@@ -1379,8 +1278,8 @@ class AlbertTransformer(AlbertPreTrainedModel):
         
         # decode
         target_ids_in, target_ids_out = target_ids[:, :-1], target_ids[:, 1:]
-        # subsequent mask is applied inside self.bert
-        dec_out, _ = self.bert(target_ids_in, attention_mask=self.mask(target_ids_in), 
+        # subsequent mask is applied inside self.albert
+        dec_out, _ = self.albert(target_ids_in, attention_mask=self.mask(target_ids_in), 
                                memory_tensor=encoder_output, src_attention_mask=input_mask)
         
         # apply extra dec layer and compute the decoder losses wrt left-shifted target seq
@@ -1429,7 +1328,7 @@ class AlbertTransformer(AlbertPreTrainedModel):
                 type_errors, type_preds)
     
     def save_bert_attentions(self, input_ids, all_attentions):
-        dir_path = "bert_attentions"
+        dir_path = "albert_attentions"
         id_to_attn_dict = {}
         for batch_idx, input_id in enumerate(input_ids):
             print("all_attentions (shape) : ", len(all_attentions), all_attentions[0].size())
@@ -1450,8 +1349,8 @@ class AlbertTransformer(AlbertPreTrainedModel):
         dec_out_ids = start_ids if start_ids.dim() > 1 else start_ids.unsqueeze(1) # [bsz, 1]
         
         for i in range(max_decoding_steps-1): # -1 as we included end_tok in max_decoding_steps
-            # subsequent mask is applied inside self.bert
-            dec_out, _ = self.bert(dec_out_ids, attention_mask=self.mask(dec_out_ids),
+            # subsequent mask is applied inside self.albert
+            dec_out, _ = self.albert(dec_out_ids, attention_mask=self.mask(dec_out_ids),
                                    memory_tensor=encoder_output, src_attention_mask=input_mask)
             # apply extra dec layer and extract the last time step pred
             dec_preds_i = self.dec_head(self.extra_dec_layer(dec_out))[:, -1:]
