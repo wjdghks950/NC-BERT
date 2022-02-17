@@ -9,6 +9,7 @@ import argparse
 import logging
 import os, sys, random, jsonlines, shutil, time
 import ujson as json
+import time
 from scipy.special import softmax
 from io import open
 from collections import namedtuple
@@ -23,45 +24,54 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
 from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 
+from transformers import BertTokenizer, RobertaTokenizer, AlbertTokenizer
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
-from modeling import BertTransformer, BertConfig
+from modeling import BertTransformer, BertConfig, AlbertTransformer
 from pytorch_pretrained_bert.optimization import BertAdam, WarmupLinearSchedule
-from pytorch_pretrained_bert.tokenization import BertTokenizer
+# from pytorch_pretrained_bert.tokenization import BertTokenizer
+
+from create_examples_n_features import DropExample, DropFeatures, read_file, write_file, split_digits
+from finetune_on_drop import make_output_dir, evaluate, save
+from allennlp.training.metrics.drop_em_and_f1 import DropEmAndF1
+
 
 CONFIG_NAME = "config.json"
 WEIGHTS_NAME = "pytorch_model.bin"
+
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
 
-from create_examples_n_features import DropExample, DropFeatures, read_file, write_file, split_digits
-from finetune_on_drop import make_output_dir, evaluate, save
-from allennlp.training.metrics.drop_em_and_f1 import DropEmAndF1
 
 START_TOK, END_TOK, SPAN_SEP, IGNORE_IDX, MAX_DECODING_STEPS, MAX_SPANS = '@', '\\', ';', 0, 20, 6
 
 
-LMInputFeatures = namedtuple("LMInputFeatures", "input_ids input_mask lm_label_ids")
+LMInputFeatures = namedtuple("LMInputFeatures", "input_ids input_mask lm_label_ids sop_label")
+
 
 class MLMDataset(TensorDataset):
     def __init__(self, training_path, epoch=1, tokenizer=None, num_data_epochs=1):
-        self.vocab = tokenizer.vocab
+        self.vocab = tokenizer.get_vocab()
         self.tokenizer = tokenizer
         self.epoch = epoch
         self.data_epoch = epoch % num_data_epochs
         data_file = training_path / f"epoch_{self.data_epoch}.jsonl"
         metrics_file = training_path / f"epoch_{self.data_epoch}_metrics.jsonl"
         assert data_file.is_file() and metrics_file.is_file()
+
+        logger.info(f"Loading from the data file from: {data_file}")
+
         metrics = json.loads(metrics_file.read_text())
         num_samples = metrics['num_training_examples']
         self.seq_len = seq_len = metrics['max_seq_len']
         
         input_ids = np.zeros(shape=(num_samples, seq_len), dtype=np.int32)
         input_masks = np.zeros(shape=(num_samples, seq_len), dtype=np.bool)
-        lm_label_ids = np.full(shape=(num_samples, seq_len), dtype=np.int32, fill_value=IGNORE_IDX) 
-        # ignore index == 0
+        lm_label_ids = np.full(shape=(num_samples, seq_len), dtype=np.int32, fill_value=IGNORE_IDX)  # ignore index == 0
+        sop_labels = np.full(shape=(num_samples, 2), dtype=np.int32, fill_value=-1)
+
         logging.info(f"Loading MLM examples for epoch {epoch}")
         with jsonlines.open(data_file, 'r') as reader:
             for i, example in enumerate(tqdm(reader.iter(), total=num_samples, desc="MLM examples")):
@@ -69,15 +79,17 @@ class MLMDataset(TensorDataset):
                 input_ids[i] = features.input_ids
                 input_masks[i] = features.input_mask
                 lm_label_ids[i] = features.lm_label_ids
+                sop_labels[i] = features.sop_label
 #                 if i == 1000:
 #                     break
-        print()
+
         assert i == num_samples - 1  # Assert that the sample count metric was true
         self.num_samples = num_samples
         self.seq_len = seq_len
         self.input_ids = input_ids
         self.input_masks = input_masks
         self.lm_label_ids = lm_label_ids
+        self.sop_labels = sop_labels
 
     def __len__(self):
         return self.num_samples
@@ -85,14 +97,16 @@ class MLMDataset(TensorDataset):
     def __getitem__(self, item):
         return (torch.tensor(self.input_ids[item]).long(),
                 torch.tensor(self.input_masks[item]).long(),
-                torch.tensor(self.lm_label_ids[item]).long())
+                torch.tensor(self.lm_label_ids[item]).long(),
+                torch.tensor(self.sop_labels[item]).long())
     
     def convert_example_to_features(self, example):
         tokens = example["tokens"]
         masked_lm_positions = example["masked_lm_positions"]
         masked_lm_labels = example["masked_lm_labels"]
+        sop_label = example["sop_label"]
         max_seq_length = self.seq_len
-        
+
         assert len(tokens) <= max_seq_length
         input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
         masked_label_ids = self.tokenizer.convert_tokens_to_ids(masked_lm_labels)
@@ -107,7 +121,7 @@ class MLMDataset(TensorDataset):
         lm_label_array[masked_lm_positions] = masked_label_ids
 
         features = LMInputFeatures(input_ids=input_array, input_mask=mask_array,
-                                   lm_label_ids=lm_label_array)
+                                   lm_label_ids=lm_label_array, sop_label=sop_label)
         return features
 
 
@@ -115,7 +129,7 @@ ModelFeatures = namedtuple("ModelFeatures", "example_id input_ids input_mask seg
 
 class DropDataset(TensorDataset):
     def __init__(self, args, split='train', typ=''):
-        logging.info(f"Loading {split} examples and features.")
+        logging.info(f"Loading {split} examples and features from [{typ}].")
         if typ == 'numeric':
             direc = args.examples_n_features_dir_numeric
         else:
@@ -127,22 +141,26 @@ class DropDataset(TensorDataset):
             fp_prefix = 'textual_'
 
         if split == 'train':
-            examples = read_file(direc + '/train_{}examples.pkl'.format(fp_prefix))
-            drop_features = read_file(direc + '/train_{}features.pkl'.format(fp_prefix))
+            # examples = read_file(direc + '/train_{}examples.pkl'.format(fp_prefix))
+            # drop_features = read_file(direc + '/train_{}features.pkl'.format(fp_prefix))
+            examples = read_file(direc + '/train_{}examples.json'.format(fp_prefix))
+            drop_features = read_file(direc + '/train_{}features.json'.format(fp_prefix))
         else:
-            examples = read_file(direc + '/eval_{}examples.pkl'.format(fp_prefix))
-            drop_features = read_file(direc + '/eval_{}features.pkl'.format(fp_prefix))
+            # examples = read_file(direc + '/eval_{}examples.pkl'.format(fp_prefix))
+            # drop_features = read_file(direc + '/eval_{}features.pkl'.format(fp_prefix))
+            examples = read_file(direc + '/eval_{}examples.json'.format(fp_prefix))
+            drop_features = read_file(direc + '/eval_{}features.json'.format(fp_prefix))
         
-        self.max_dec_steps = len(drop_features[0].decoder_label_ids)
+        self.max_dec_steps = len(drop_features[0]["decoder_label_ids"])  # len(drop_features[0].decoder_label_ids)
         
         features = []
-        for i, (example, drop_feature) in enumerate(zip(examples, drop_features)):
+        for i, (example, drop_feature) in enumerate(tqdm(zip(examples, drop_features), total=len(examples))):
             features.append(self.convert_to_input_features(example, drop_feature))
             if split == 'train' and args.num_train_samples >= 0 and len(features) >= args.num_train_samples:
                 break
         
         self.num_samples = len(features)
-        self.seq_len = drop_features[0].max_seq_length
+        self.seq_len = drop_features[0]["max_seq_length"]  # drop_features[0].max_seq_length
         self.examples = examples
         self.drop_features = drop_features
         self.features = features
@@ -164,28 +182,28 @@ class DropDataset(TensorDataset):
                 self.head_type[item], self.q_spans[item], self.p_spans[item])
     
     def convert_to_input_features(self, drop_example, drop_feature):
-        max_seq_len = drop_feature.max_seq_length
+        max_seq_len =  drop_feature["max_seq_length"]  # drop_feature.max_seq_length
         
         # input ids are padded by 0
-        input_ids = drop_feature.input_ids
+        input_ids = drop_feature["input_ids"]  # drop_feature.input_ids
         input_ids += [IGNORE_IDX] * (max_seq_len - len(input_ids))
         
         # input mask is padded by 0
-        input_mask = drop_feature.input_mask
+        input_mask = drop_feature["input_mask"]  # drop_feature.input_mask
         input_mask += [0] * (max_seq_len - len(input_mask))
         
         # segment ids are padded by 0
-        segment_ids = drop_feature.segment_ids
+        segment_ids = drop_feature["segment_ids"]  # drop_feature.segment_ids
         segment_ids += [0] * (max_seq_len - len(segment_ids))
         
         # we assume dec label ids are already padded by 0s
-        decoder_label_ids = drop_feature.decoder_label_ids
+        decoder_label_ids = drop_feature["decoder_label_ids"]  # drop_feature.decoder_label_ids
         assert len(decoder_label_ids) == self.max_dec_steps 
         #decoder_label_ids += [0] * (MAX_DECODING_STEPS - len(decoder_label_ids))
         
         # for span extraction head, ignore idx == -1
         question_len = segment_ids.index(1) if 1 in segment_ids else len(segment_ids)
-        starts, ends = drop_feature.start_indices, drop_feature.end_indices
+        starts, ends = drop_feature["start_indices"], drop_feature["end_indices"]  # drop_feature.start_indices, drop_feature.end_indices
         q_spans, p_spans = [], []
         for st, en in zip(starts, ends):
             if any([x < 0 or x >= max_seq_len for x in [st, en]]):
@@ -199,7 +217,7 @@ class DropDataset(TensorDataset):
         q_spans += [[-1,-1]]*(MAX_SPANS - len(q_spans))
         p_spans += [[-1,-1]]*(MAX_SPANS - len(p_spans))
                 
-        return ModelFeatures(drop_feature.example_index, input_ids, input_mask, segment_ids,
+        return ModelFeatures(drop_feature["example_index"], input_ids, input_mask, segment_ids,
                              decoder_label_ids, head_type, q_spans, p_spans)
 
 
@@ -220,7 +238,8 @@ def main():
     parser.add_argument("--bert_model", default='bert-base-uncased', type=str,
                         help="Bert pre-trained model selected in the list: bert-base-uncased, "
                         "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
-                        "bert-base-multilingual-cased, bert-base-chinese.")
+                        "bert-base-multilingual-cased, bert-base-chinese."
+                        "albert-xxlarge-v2, robert-base, robert-large.")
     parser.add_argument("--output_dir",
                         default='./out_drop_finetune',
                         type=str,
@@ -229,7 +248,7 @@ def main():
     parser.add_argument("--init_weights_dir",
                         default='',
                         type=str,
-                        help="The directory where init model wegihts an config are stored.")
+                        help="The directory where init model weights an config are stored.")
     parser.add_argument("--max_seq_length",
                         default=-1,
                         type=int,
@@ -314,6 +333,9 @@ def main():
     parser.add_argument('--mlm_scale',
                         type=float, default=1.0,
                         help="mlm loss scaling factor.")
+    parser.add_argument('--sop_scale',
+                        type=float, default=1.0,
+                        help="sop loss scaling factor.")
     parser.add_argument('--loss_scale',
                         type=float, default=0,
                         help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
@@ -350,25 +372,42 @@ def main():
         make_output_dir(args, scripts_to_save=[sys.argv[0], 'finetune_on_drop.py', 
                                                'modeling.py', 'create_examples_n_features.py'])
 
-    #tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
-    
-    if args.init_weights_dir:
-        model = BertTransformer.from_pretrained(args.init_weights_dir)
+    model_prefix = args.bert_model.split("-")[0].strip()
+    if model_prefix == "bert":
+        tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
+    elif model_prefix == "roberta":
+        tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
+    elif model_prefix == "albert":
+        tokenizer = AlbertTokenizer.from_pretrained(args.bert_model)
     else:
-        # prepare model
-        model = BertTransformer.from_pretrained(args.model,
-            cache_dir=os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_{}'.format(args.local_rank)))
+        raise AttributeError("Specified attribute {} is not found".format(args.bert_model))
+    
+    if model_prefix == "bert":
+        if args.init_weights_dir:
+            model = BertTransformer.from_pretrained(args.init_weights_dir)
+        else:
+            # prepare model
+            model = BertTransformer.from_pretrained(args.model,
+                cache_dir=os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_{}'.format(args.local_rank)))
+    elif model_prefix == "albert":
+        if args.init_weights_dir:
+            model = AlbertTransformer.from_pretrained(args.init_weights_dir)
+        else:
+            # prepare model
+            model = AlbertTransformer.from_pretrained(args.bert_model,
+                cache_dir=os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_{}'.format(args.local_rank)))
     
     model.to(device)
     if n_gpu > 1:
         model = torch.nn.DataParallel(model)
-    
+
+    start_time = time.time()
+
     eval_data1 = DropDataset(args, 'eval', 'syntext')
     eval_sampler1 = SequentialSampler(eval_data1)
     eval_dataloader1 = DataLoader(eval_data1, sampler=eval_sampler1, batch_size=args.eval_batch_size)
 
-    logger.info("***** Running evaluation *****")
+    logger.info("***** Running evaluation (syntext) *****")
     logger.info("  Num examples = %d", len(eval_data1))
     logger.info("  Batch size = %d", args.eval_batch_size)
     
@@ -376,27 +415,39 @@ def main():
     eval_sampler2 = SequentialSampler(eval_data2)
     eval_dataloader2 = DataLoader(eval_data2, sampler=eval_sampler2, batch_size=args.eval_batch_size)
 
-    logger.info("***** Running evaluation *****")
+    logger.info("***** Running evaluation (numeric) *****")
     logger.info("  Num examples = %d", len(eval_data2))
     logger.info("  Batch size = %d", args.eval_batch_size)
     
     if args.do_eval and args.do_inference:
         inference(args, model, eval_dataloader, device, tokenizer)
         exit()
-        
+
     if args.do_train:
         # Prepare data loader
         train_data1 = DropDataset(args, 'train', 'syntext')
         train_sampler1 = RandomSampler(train_data1)
         train_dataloader1 = DataLoader(train_data1, sampler=train_sampler1, batch_size=args.train_batch_size_syntext)
-        
+
         train_data2 = DropDataset(args, 'train', 'numeric')
         train_sampler2 = RandomSampler(train_data2)
         train_dataloader2 = DataLoader(train_data2, sampler=train_sampler2, batch_size=args.train_batch_size_numeric)
         train_data2_iter = iter(train_dataloader2)
 
         num_train_optimization_steps = len(train_dataloader1) // args.gradient_accumulation_steps * args.num_train_epochs
+
+        logger.info("***** Running training (syntext) *****")
+        logger.info("  Num examples = %d", len(train_data1))
+        logger.info("  Batch size = %d", args.train_batch_size_syntext)
+        logger.info("  Num steps = %d", num_train_optimization_steps)
+    
+        logger.info("***** Running training (numeric) *****")
+        logger.info("  Num examples = %d", len(train_data2))
+        logger.info("  Batch size = %d", args.train_batch_size_numeric)
+        logger.info("  Num steps = %d", num_train_optimization_steps)
         
+        print("--- %s seconds (for loading eval and train dataset) ---" % (time.time() - start_time))
+
         # Prepare optimizer
         param_optimizer = list(model.named_parameters())
 
@@ -413,11 +464,6 @@ def main():
                      lr=args.learning_rate,
                      warmup=args.warmup_proportion,
                      t_total=num_train_optimization_steps)
-        
-        logger.info("***** Running training *****")
-        logger.info("  Num examples = %d", len(train_data1))
-        logger.info("  Batch size = %d", args.train_batch_size_syntext)
-        logger.info("  Num steps = %d", num_train_optimization_steps)
         
         '''
         ------------------------------------------------------------------------------
@@ -449,9 +495,10 @@ def main():
         model.train()
         (global_step, all_losses1, all_errors1, all_dec_losses1, all_dec_errors1, eval_errors1,
          best, best_mlm, t_prev, do_eval) = 0, [], [], [], [], [], 1000, 1000, time.time(), False
-        mlm_losses, mlm_errors, all_span_losses1, all_span_errors1 = ([],)*4
-        all_losses2, all_errors2, all_dec_losses2, all_dec_errors2, eval_errors2 = ([],)*5
-        all_span_losses2, all_span_errors2 = ([],)*2
+        mlm_losses, mlm_errors, all_span_losses1, all_span_errors1 = ([],) * 4
+        all_losses2, all_errors2, all_dec_losses2, all_dec_errors2, eval_errors2 = ([],) * 5
+        all_span_losses2, all_span_errors2 = ([],) * 2
+        sop_losses = []
         
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             for step, batch in enumerate(tqdm(train_dataloader1, desc="Iteration")):
@@ -526,9 +573,9 @@ def main():
                         except StopIteration:       # end of epoch: reset and shuffle
                             mlm_iter = iter(mlm_dataloader)
                     batch = tuple(t.to(device) for t in batch)
-                    input_ids, input_mask, label_ids = batch
-                    loss, errs = model(input_ids, None, input_mask, target_ids=label_ids, 
-                                       ignore_idx=IGNORE_IDX, task='mlm')
+                    input_ids, input_mask, label_ids, sop_labels = batch
+                    loss, errs = model(input_ids, None, input_mask, target_ids=label_ids,
+                                       sop_labels=sop_labels, ignore_idx=IGNORE_IDX, task='mlm')
                     loss, err_sum = take_mean(loss), take_sum(errs)      # for multi-gpu
                     if args.gradient_accumulation_steps > 1:
                         loss = loss / args.gradient_accumulation_steps
@@ -540,6 +587,21 @@ def main():
                             scaled_loss.backward()
                     else:
                         loss.backward()
+                    
+                    # grads wrt to sop task (sentence order prediction)
+                    loss, errs = model(input_ids, None, input_mask, target_ids=label_ids,
+                                       sop_labels=sop_labels, ignore_idx=IGNORE_IDX, task='sop')
+                    loss = take_mean(loss)
+                    if args.gradient_accumulation_steps > 1:
+                        loss = loss / args.gradient_accumulation_steps
+                    loss = args.sop_scale * loss
+
+                    if fp16:
+                        with amp.scale_loss(loss, optimizer) as scaled_loss:
+                            scaled_loss.backward()
+                    else:
+                        loss.backward()
+
                 else:
                     mlm_losses.append(-1); mlm_errors.append(-1)
                 
@@ -557,9 +619,11 @@ def main():
                                 'lr': optimizer.get_lr()[0], 'trn_span_loss2': all_span_losses2[-1], 
                                 'trn_span_err2': all_span_errors2[-1]}
                 mlm_result = {'trn_mlm_loss': mlm_losses[-1], 'trn_mlm_err': mlm_errors[-1]}
+                sop_result = {'trn_sop_loss': sop_losses[-1]}
                 tb_writer.add_scalars('train_syntext', train_result1, len(all_losses1))
                 tb_writer.add_scalars('train_numeric', train_result2, len(all_losses2))
                 tb_writer.add_scalars('mlm', mlm_result, len(all_losses1)) if do_mlm_task else None
+                tb_writer.add_scalars('sop', sop_result, len(all_losses1)) if do_mlm_task else None
                 
                 if time.time() - t_prev > 60*60: # evaluate every hr
                     do_eval = True
