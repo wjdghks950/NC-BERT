@@ -581,7 +581,6 @@ class BertPredictionHeadTransform(nn.Module):
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, hidden_states):
-        print("** hidden_states: ", hidden_states)  # TODO: hidden_states turns out as `str`
         hidden_states = self.dense(hidden_states)
         hidden_states = self.transform_act_fn(hidden_states)
         hidden_states = self.LayerNorm(hidden_states)
@@ -1222,7 +1221,7 @@ class AlbertTransformer(AlbertPreTrainedModel):
                  sop_labels=None, random_shift=False, ignore_idx=-1):
         # SOP task takes the encoded output straight from albert
         input_mask = self.mask(input_ids)
-        outputs _ = self.albert(input_ids, input_mask, token_type_ids)
+        outputs = self.albert(input_ids, input_mask, token_type_ids)
         prediction_scores = self.cls_sop(outputs.last_hidden_state)
         preds = prediction_scores.argmax(dim=-1)
         
