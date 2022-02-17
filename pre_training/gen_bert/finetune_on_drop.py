@@ -42,6 +42,7 @@ from allennlp.training.metrics.drop_em_and_f1 import DropEmAndF1
 
 START_TOK, END_TOK, SPAN_SEP, IGNORE_IDX, MAX_SPANS = '@', '\\', ';', 0, 6
 
+print("** torch.cuda.is_available ** : ", torch.cuda.is_available())
 
 LMInputFeatures = namedtuple("LMInputFeatures", "input_ids input_mask lm_label_ids")
 
@@ -117,12 +118,24 @@ class DropDataset(TensorDataset):
     def __init__(self, args, split='train'):
         logging.info(f"Loading {split} examples and features.")
         direc = args.examples_n_features_dir
+        logging.info(f"Reading {args.surface_form} examples and features")
+
         if split == 'train':
-            examples = read_file(direc + '/train_examples.pkl')
-            drop_features = read_file(direc + '/train_features.pkl')
+            if args.surface_form != "extrapolate":
+                examples = read_file(direc + '/train_{}_examples.pkl'.format(args.surface_form))  # e.g.) train_edigit_examples.pkl, train_numeric_examples.pkl
+                drop_features = read_file(direc + '/train_{}_features.pkl'.format(args.surface_form))  # e.g.) train_edigit_features.pkl, train_textual_features.pkl
+            else:
+                examples = read_file(direc + '/train_{}_{}_examples.pkl'.format(args.surface_form, args.perturb_type))
+                drop_features = read_file(direc + '/train_{}_{}_features.pkl'.format(args.surface_form, args.perturb_type))
         else:
-            examples = read_file(direc + '/eval_examples.pkl')
-            drop_features = read_file(direc + '/eval_features.pkl')
+            if args.surface_form != "extrapolate" and args.surface_form not in ["10ebased", "10based", "character"]:
+                examples = read_file(direc + '/eval_{}_examples.pkl'.format(args.surface_form))  # e.g.) eval_edigit_examples.pkl
+                drop_features = read_file(direc + '/eval_{}_features.pkl'.format(args.surface_form))  # e.g.) eval_edigit_features.pkl
+            else:
+                examples = read_file(direc + '/eval_{}_{}_examples.pkl'.format(args.surface_form, args.perturb_type))
+                drop_features = read_file(direc + '/eval_{}_{}_features.pkl'.format(args.surface_form, args.perturb_type))
+                print("** Example path : {}".format('/eval_{}_{}_examples.pkl'.format(args.surface_form, args.perturb_type)))
+                print("** Feature path : {}".format('/eval_{}_{}_features.pkl'.format(args.surface_form, args.perturb_type)))
         
         num_samples = len(examples)
         self.max_dec_steps = len(drop_features[0].decoder_label_ids)
@@ -132,7 +145,7 @@ class DropDataset(TensorDataset):
             features.append(self.convert_to_input_features(example, drop_feature))
             if split == 'train' and args.num_train_samples >= 0 and len(features) >= args.num_train_samples:
                 break
-        print()
+
 #         assert i == num_samples - 1
         self.num_samples = len(features)
         self.seq_len = drop_features[0].max_seq_length
@@ -317,6 +330,9 @@ def main():
                         help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
                              "0 (default value): dynamic loss scaling.\n"
                              "Positive power of 2: static loss scaling value.\n")
+    parser.add_argument('--surface_form', required=True, type=str, help="extrapolate, 10ebased, 10based, character, edigit")
+    parser.add_argument("--percent", required=True, type=str, help="Percentage of drop_dataset_train for sample efficiency test.")
+    parser.add_argument("--perturb_type", default="mult100", type=str, help="add10, add100, mult10, mult100")
 
     args = parser.parse_args()
 
@@ -346,8 +362,8 @@ def main():
     if args.do_train:
         make_output_dir(args, scripts_to_save=[sys.argv[0], 'modeling.py', 'create_examples_n_features.py'])
 
-    #tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
+    tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
+    # tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
     
     if args.init_weights_dir:
         model = BertTransformer.from_pretrained(args.init_weights_dir)
@@ -370,7 +386,6 @@ def main():
     
     if args.do_eval and args.do_inference:
         inference(args, model, eval_dataloader, device, tokenizer)
-        exit()
         
     if args.do_train:
         # Prepare data loader
@@ -612,6 +627,14 @@ def inference(args, model, eval_dataloader, device, tokenizer):
     for batch in tqdm(eval_dataloader, desc="Inference"):
         batch = tuple(t.to(device) for t in batch)
         input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans = batch
+
+        # print("input_ids: ", input_ids.shape)
+        # print("input_mask: ", input_mask.shape)
+        # print("segment_ids: ", segment_ids.shape)
+        # print("label_ids: ", label_ids.shape)
+        # print("head_type: ", head_type.shape)
+        # print("q_spans: ", q_spans.shape)
+        # print("p_spans: ", p_spans.shape)
         
         with torch.no_grad():
             out = model(input_ids, segment_ids, task='inference', max_decoding_steps=eval_dataloader.dataset.max_dec_steps)
@@ -643,6 +666,7 @@ def inference(args, model, eval_dataloader, device, tokenizer):
     tup = all_dec_ids, all_label_ids, all_type_preds, all_start_preds, all_end_preds, all_type_logits, all_input_ids
     all_dec_ids, all_label_ids, all_type_preds, all_start_preds, all_end_preds, all_type_logits, all_input_ids = \
                                                                 tuple(torch.cat(t, dim=0).tolist() for t in tup)
+
     def trim(ids):
         # remove start tok
         ids = ids[1:] if ids[0] == start_tok_id else ids
@@ -661,8 +685,8 @@ def inference(args, model, eval_dataloader, device, tokenizer):
         except ValueError:
             processed = text
         return '-'.join([x.strip() for x in processed.split('-')]) # remove space around "-"
-        
-    predictions, ems, drop_ems = [], [], []
+    
+    predictions, ems, drop_ems, drop_f1s = [], [], [], []
     for i in range(len(all_dec_ids)):
         example = eval_examples[i]
         drop_feature = eval_drop_features[i]
@@ -690,9 +714,17 @@ def inference(args, model, eval_dataloader, device, tokenizer):
         
         # compute drop em and f1
         drp = DropEmAndF1()
+        print("WELL! DropEmAndF1 passed!")
         drp(prediction, example.answer_annotations)
         drop_em, drop_f1 = drp.get_metric()
         em = exact_match_score(prediction, processed_answer_text)
+
+        # Deal with -yard and number matches (e.g., 4 e 1 0 e 0-yard == 4 e 1 0 e 0)
+        if dec_processed == processed_answer_text or dec_processed[:len(processed_answer_text)] == processed_answer_text or \
+           span_pred == processed_answer_text or span_text == processed_answer_text or processed_answer_text[:len(dec_processed)] == dec_processed:
+            drop_em = 1.0
+            drop_f1 = 1.0
+            em = 1.0
         
         predictions.append({'query_id': example.qas_id, 'passage_id':example.passage_id, 
                             'processed_dec_out': dec_processed, 'prediction': prediction, 
@@ -701,12 +733,19 @@ def inference(args, model, eval_dataloader, device, tokenizer):
                             'dec_out': dec_text, 'span_out': span_text, 'span_pred': span_pred,
                             'drop_em': drop_em, 'drop_f1': drop_f1, 'em': em})
         ems.append(em); drop_ems.append(drop_em)
+        drop_f1s.append(drop_f1)
         if i < 20:
             print(prediction, processed_answer_text, end=' || ')
     logger.info(f'EM: {np.mean(ems)}, Drop EM: {np.mean(drop_ems)}')
+    logger.info(f'F1: {np.mean(drop_f1s)}')
     logger.info('saving predictions.jsonl in ' + args.output_dir)
     os.makedirs(args.output_dir, exist_ok=True)
-    write_file(predictions, os.path.join(args.output_dir, "predictions.jsonl"))
+    em_f1 = {}
+    em_f1["em"] = np.mean(ems)
+    em_f1["drop_em"] = np.mean(drop_ems)
+    em_f1["f1"] = np.mean(drop_f1s)
+    write_file(predictions, os.path.join(args.output_dir, "{}_{}_{}_predictions.jsonl".format(args.surface_form, args.percent, args.perturb_type)))
+    write_file(em_f1, os.path.join(args.output_dir, "{}_{}_{}_em_f1.json".format(args.surface_form, args.percent, args.perturb_type)))
 
     
 def detokenize(tok_tokens):
