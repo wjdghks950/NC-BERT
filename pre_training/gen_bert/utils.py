@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def check_float(n):
     try:
         float(n)
