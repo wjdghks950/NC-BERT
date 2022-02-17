@@ -1,7 +1,9 @@
-import os, json, copy, string, itertools, logging, pickle, argparse, jsonlines
+import os, json, copy, string, itertools, logging, argparse, jsonlines
+import _pickle as pickle
 from typing import Any, Dict, List, Tuple
 from collections import defaultdict
 import re
+import pandas as pd
 
 from allennlp.common.file_utils import cached_path
 from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
@@ -197,7 +199,7 @@ class DropReader(object):
         file_path = cached_path(file_path)
         self.logger.info("Reading file at %s", file_path)
         dataset = read_file(file_path)
-        examples, skip_count = [], 0
+        examples, skip_count, examples_dict = [], 0, []
         for passage_id, passage_info in tqdm(dataset.items()):
             passage_text = passage_info["passage"]
             for question_answer in passage_info["qa_pairs"]:
@@ -216,14 +218,16 @@ class DropReader(object):
                 example = self.text_to_example(question_text, passage_text, passage_id, question_id, answer_annotations)
                 if example is not None:
                     examples.append(example)
+                    # print("Example: ", vars(example))
+                    # exit()
+                    examples_dict.append(vars(example))  # TODO: Convert `example` to dict
                 else:
                     skip_count += 1
             if self.max_n_samples > 0 and len(examples) >= self.max_n_samples:
                 break
         self.logger.info(f"Skipped {skip_count} examples, kept {len(examples)} examples.")
-        return examples
+        return examples, examples_dict
 
-    
     def text_to_example(self,  # type: ignore
                          question_text: str,
                          passage_text: str,
@@ -489,7 +493,7 @@ def convert_examples_to_features(examples, tokenizer, tokenizer_model, max_seq_l
     tokenize = (lambda s: split_digits(tokenizer.tokenize(s), bert_model=tokenizer_model, subword=make_subword)) if indiv_digits else tokenizer.tokenize
     # tokenize = (lambda s: split_digits_nonsubwords(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
 
-    features, all_qp_lengths = [], []
+    features, features_dict, all_qp_lengths = [], [], []
     for (example_index, example) in enumerate(tqdm(examples)):
         que_tok_to_orig_index = []
         que_orig_to_tok_index = []
@@ -499,7 +503,7 @@ def convert_examples_to_features(examples, tokenizer, tokenizer_model, max_seq_l
             sub_tokens = tokenize(token)
             que_tok_to_orig_index += [i]*len(sub_tokens)
             all_que_tokens += sub_tokens
-            
+
         doc_tok_to_orig_index = []
         doc_orig_to_tok_index = []
         all_doc_tokens = []
@@ -593,8 +597,9 @@ def convert_examples_to_features(examples, tokenizer, tokenizer_model, max_seq_l
         if start_indices != [] and end_indices != []:
             assert example.number_of_answer is not None
             number_of_answers.append(example.number_of_answer - 1)
-            
-        features.append(DropFeatures(
+
+        # Convert features to dict (to store as json instead of pkl)
+        feature = DropFeatures(
                 unique_id=unique_id,
                 example_index=example_index,
                 max_seq_length=max_seq_length,
@@ -608,11 +613,15 @@ def convert_examples_to_features(examples, tokenizer, tokenizer_model, max_seq_l
                 start_indices=start_indices,
                 end_indices=end_indices,
                 number_of_answers=number_of_answers,
-                decoder_label_ids=decoder_label_ids))
+                decoder_label_ids=decoder_label_ids)
+        
+        features.append(feature)
+        features_dict.append(vars(feature))  # TODO: Convert `feature` to dict
         unique_id += 1
        
     logger.info(f"Skipped {skip_count} features, truncated {truncate_count} features, kept {len(features)} features.")
-    return features, all_qp_lengths
+    return features, features_dict, all_qp_lengths
+
 
 def read_file(file):
     if file.endswith('jsonl'):
@@ -620,12 +629,19 @@ def read_file(file):
             return [d for d in reader.iter()]
     
     if file.endswith('json'):
-        with open(file, encoding='utf8') as f:
-            return json.load(f)
+        # with open(file, encoding='utf8') as f:
+        #     return json.load(f)
+        df = pd.read_json(file)  # pandas is much faster when loading large json files
+        trunc_idx = 1000
+        if df.shape[0] > trunc_idx:
+            df = df.truncate(after=trunc_idx)
+        return list(df.T.to_dict().values())
 
     if any([file.endswith(ext) for ext in ['pkl', 'pickle', 'pck', 'pcl']]):
+        print("pickle file!! ***")
         with open(file, 'rb') as f:
             return pickle.load(f)
+
 
 def write_file(data, file):
     if file.endswith('jsonl'):
@@ -638,7 +654,9 @@ def write_file(data, file):
     
     if any([file.endswith(ext) for ext in ['pkl', 'pickle', 'pck', 'pcl']]):
         with open(file, 'wb') as f:
-            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            # pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(data, f, -1)  # -1 instead of HIGHEST_PROTOCOL for _pickle
+
 
 def main():
     parser = argparse.ArgumentParser(description='Used to make examples, features from DROP-like dataset.')
@@ -673,9 +691,9 @@ def main():
                              include_multi_span=True,
                              logger=logger)
 
-    examples = drop_reader._read(args.drop_json)
+    examples, examples_dict = drop_reader._read(args.drop_json)
 
-    features, lens = convert_examples_to_features(
+    features, features_dict, lens = convert_examples_to_features(  # TODO: `features_dict` should be returned in the form of List[dict]
         examples=examples,
         tokenizer=tokenizer,
         tokenizer_model=model_prefix,
@@ -688,20 +706,21 @@ def main():
     split = 'train' if args.split == 'train' else 'eval'
     
     if args.surface_form == "extrapolate" and args.perturb_type in ["add10", "add100", "factor10", "factor100", "randadd10", "randfactor100"]:
-        write_file(examples, args.output_dir + '/%s_%s_%s_examples.pkl' % (split, args.surface_form, args.perturb_type))
-        write_file(features, args.output_dir + '/%s_%s_%s_features.pkl' % (split, args.surface_form, args.perturb_type))
+        write_file(examples_dict, args.output_dir + '/%s_%s_%s_examples.json' % (split, args.surface_form, args.perturb_type))
+        write_file(features_dict, args.output_dir + '/%s_%s_%s_features.json' % (split, args.surface_form, args.perturb_type))
     elif args.surface_form != "extrapolate":
         if args.drop_json.split("_")[2] in ["dataset"]:
-            write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[2]))
-            write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[2]))
+            write_file(examples_dict, args.output_dir + '/%s_%s_examples.json' % (split, args.drop_json.split("_")[2]))
+            write_file(features_dict, args.output_dir + '/%s_%s_features.json' % (split, args.drop_json.split("_")[2]))
         elif args.drop_json.split("_")[1] in ["numeric", "textual"]:
-            write_file(examples, args.output_dir + '/%s_%s_examples.pkl' % (split, args.drop_json.split("_")[1]))
-            write_file(features, args.output_dir + '/%s_%s_features.pkl' % (split, args.drop_json.split("_")[1]))
+            write_file(examples_dict, args.output_dir + '/%s_%s_examples.json' % (split, args.drop_json.split("_")[1]))
+            write_file(features_dict, args.output_dir + '/%s_%s_features.json' % (split, args.drop_json.split("_")[1]))
         else:
             pass
     else:
         raise ValueError("Invalid args.surface_form, args.perturb_type.")
-    print("DROP dataset preprocessing COMPLETE. Pkl file saved.")
+    # print("DROP dataset preprocessing COMPLETE. Pkl file saved.")
+    print("DROP dataset preprocessing COMPLETE. json file saved.")
 
 
 if __name__ == "__main__":
