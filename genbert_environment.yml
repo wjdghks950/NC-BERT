@@ -42,6 +42,7 @@ dependencies:
   - olefile=0.46=pyh9f0ad1d_1
   - openjpeg=2.4.0=hb52868f_1
   - openssl=1.1.1l=h7f98852_0
+  - overrides==3.1.0
   - pillow=8.3.2=py37h0f21c89_0
   - pip=21.3=pyhd8ed1ab_0
   - pycparser=2.20=pyh9f0ad1d_2
