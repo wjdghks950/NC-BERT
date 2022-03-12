@@ -314,8 +314,7 @@ class AlbertAttention(nn.Module):
         self.all_head_size = self.attention_head_size * self.num_attention_heads
         self.pruned_heads = self.pruned_heads.union(heads)
 
-    def forward(self, hidden_states, attention_mask=None, head_mask=None, output_attentions=False,
-                memory_tensor=None):
+    def forward(self, hidden_states, attention_mask=None, head_mask=None, output_attentions=False, memory_tensor=None):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
@@ -334,6 +333,9 @@ class AlbertAttention(nn.Module):
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
         if attention_mask is not None:
+            print("hidden_states: ", hidden_states.size())
+            print("attention_mask: ", attention_mask.size())
+            print("attention_scores: ", attention_scores.size())
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
             attention_scores = attention_scores + attention_mask
 
@@ -391,8 +393,7 @@ class AlbertLayer(nn.Module):
         self, hidden_states, attention_mask=None, head_mask=None, output_attentions=False,
         output_hidden_states=False, memory_tensor=None, src_attention_mask=None
     ):
-        attention_output = self.attention(hidden_states, attention_mask, head_mask, output_attentions,
-                                          memory_tensor=memory_tensor)
+        attention_output = self.attention(hidden_states, attention_mask, head_mask, output_attentions)
         ffn_output = apply_chunking_to_forward(
             self.ff_chunk,
             self.chunk_size_feed_forward,
@@ -403,7 +404,7 @@ class AlbertLayer(nn.Module):
         if memory_tensor is None:
             return (hidden_states,) + attention_output[1:]  # add attentions if we output them
         else:  # else decoder layer
-            attention_output = self.attention(attention_output, src_attention_mask, head_mask, output_attentions,
+            attention_output = self.attention(attention_output[0], src_attention_mask, head_mask, output_attentions,
                                               memory_tensor=memory_tensor)
             ffn_output = apply_chunking_to_forward(
                 self.ff_chunk,
@@ -750,7 +751,7 @@ class AlbertModel(AlbertPreTrainedModel):
                 # [bsz, 1, key_seq_len, key_seq_len]
                 subsequent_mask = torch.triu(torch.ones_like(extended_mask)).transpose(2, 3)
                 extended_mask = extended_mask * subsequent_mask
-                
+
             # mask should be 1.0 for positions we want to attend and 0.0 for others.
             extended_mask = (1.0 - extended_mask) * -10000.0
             return extended_mask
@@ -758,6 +759,10 @@ class AlbertModel(AlbertPreTrainedModel):
         # When Albert is used as a decoder - need to incorporate `memory_tensor` (the last hidden states from encoder)
         extended_attention_mask = extend(attention_mask, memory_tensor is not None)
         extended_src_attention_mask = None if src_attention_mask is None else extend(src_attention_mask)
+
+        if src_attention_mask is not None:
+            print("extended_attention_mask: ", extended_attention_mask.size())
+            print("extended_src_attention_mask: ", extended_src_attention_mask.size())
 
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
