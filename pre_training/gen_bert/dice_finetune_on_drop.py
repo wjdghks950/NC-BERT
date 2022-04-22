@@ -37,7 +37,6 @@ from dice import DiceEmbedding
 CONFIG_NAME = "config.json"
 WEIGHTS_NAME = "pytorch_model.bin"
 CONTEXT_TOKEN = '[CTX]'
-CONTEXT_END = '[/CTX]'
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt = '%m/%d/%Y %H:%M:%S',
@@ -128,18 +127,12 @@ class DropDataset(TensorDataset):
         logging.info(f"Reading {args.surface_form} examples and features")
 
         if split == 'train':
-            if (args.surface_form == "dice" and args.percent == "all") or args.surface_form == "ctx_only":  # dice and ctx_only
-                example_path = direc + '/train_{}_examples.pkl'.format("local_ctx")
-                feature_path = direc + '/train_{}_features.pkl'.format("local_ctx")
-            elif args.surface_form in ["diceloss"] and args.percent == "all":  # diceembed
+            if args.surface_form in ["diceloss"] and args.percent == "all":  # diceembed
                 example_path = direc + '/train_{}_examples.pkl'.format("dataset")
                 feature_path = direc + '/train_{}_features.pkl'.format("dataset")
-            elif (args.surface_form in ["numeric", "textual"] or args.surface_form in ["dicemlp", "pretrain_ctx", "digitctx", "attnmask"]) and args.percent == "all":
+            elif args.surface_form in ["numeric", "textual"]:
                 example_path = direc + '/train_{}_examples.pkl'.format(args.surface_form)
                 feature_path = direc + '/train_{}_features.pkl'.format(args.surface_form)
-                if args.surface_form in ["attnmask"]:
-                    example_path = direc + '/train_{}_examples.pkl'.format("digitctx")
-                    feature_path = direc + '/train_{}_features.pkl'.format("digitctx")
             else:
                 example_path = direc + '/train_{}_examples.pkl'.format(args.surface_form)
                 feature_path = direc + '/train_{}_features.pkl'.format(args.surface_form)
@@ -149,18 +142,12 @@ class DropDataset(TensorDataset):
             examples = read_file(example_path)
             drop_features = read_file(feature_path)
         else:
-            if args.surface_form == "dice" or args.surface_form == "ctx_only":
-                example_path = direc + '/eval_{}_examples.pkl'.format("local_ctx")
-                feature_path = direc + '/eval_{}_features.pkl'.format("local_ctx")
-            elif args.surface_form in ["diceloss"] and args.percent == "all":
+            if args.surface_form in ["diceloss"] and args.percent == "all":
                 example_path = direc + '/eval_{}_examples.pkl'.format("dataset")
                 feature_path = direc + '/eval_{}_features.pkl'.format("dataset")
-            elif (args.surface_form in ["numeric", "textual"] or args.surface_form in ["dicemlp", "pretrain_ctx", "digitctx", "attnmask"]) and args.percent == "all":
+            elif args.surface_form in ["numeric", "textual"]:
                 example_path = direc + '/eval_{}_examples.pkl'.format(args.surface_form)
                 feature_path = direc + '/eval_{}_features.pkl'.format(args.surface_form)
-                if args.surface_form in ["attnmask"]:
-                    example_path = direc + '/eval_{}_examples.pkl'.format("digitctx")
-                    feature_path = direc + '/eval_{}_features.pkl'.format("digitctx")
             else:
                 if args.perturb_type in ["add10", "add100", "factor10", "factor100", "randadd100", "randfactor100"]:
                     example_path = direc + '/eval_{}_{}_examples.pkl'.format(args.surface_form, args.perturb_type)
@@ -344,6 +331,7 @@ def collate_batch(batch):
     
     return new_batch
 
+
 def make_output_dir(args, scripts_to_save=[sys.argv[0]]):
     # scripts_to_save are relative paths of files to save
     os.makedirs(args.output_dir, exist_ok=True)
@@ -355,41 +343,6 @@ def make_output_dir(args, scripts_to_save=[sys.argv[0]]):
     for script in scripts_to_save:
         dst_file = os.path.join(code_dir, os.path.basename(script))
         shutil.copyfile(script, dst_file)
-
-
-def replace_to_dice(args, tokenizer: BertTokenizer, embeddings: torch.nn.Embedding, model):
-    # Turn 0~9 into DiceEmbeddings (in torch.tensor) (min_bound=0, max_bound=9)
-    dice = DiceEmbedding(model.config.hidden_size, min_bound=args.min_bound, max_bound=args.max_bound)
-    # Identify the indices of the 0~9 embeddings in `embeddings`
-    digits = [str(d) for d in list(range(10))]
-    idx2digit = {}
-    digit2idx = {}
-    for token, idx in tokenizer.get_vocab().items():
-        if token in digits:
-            idx2digit[idx] = token
-            digit2idx[token.strip()] = idx
-    # Replace the embeddings
-    # Here, we do not deal with ##0, ##1, ..., ##9 (because they are redundant with 0-9 embeddings)
-    dice_embeddings = {}
-    if os.path.exists(os.path.join(args.dice_dir, args.dice_path)):
-        dice_embeddings = torch.load(os.path.join(args.dice_dir, args.dice_path))
-        logger.info("digit-DICE embedding loaded from {}".format(os.path.join(args.dice_dir, args.dice_path)))
-    else:
-        if not os.path.isdir(args.dice_dir):
-            os.mkdir(args.dice_dir)
-        for idx, digit in idx2digit.items():
-            dice_embeddings[digit] = dice.make_dice(int(digit))
-        torch.save(dice_embeddings, os.path.join(args.dice_dir, args.dice_path))
-        logger.info("digit-DICE embedding saved at {}".format(os.path.join(args.dice_dir, args.dice_path)))
-    
-    digit_list, dice_list = map(list, zip(*dice_embeddings.items()))
-    digit_idx_list = [digit2idx[d] for d in digit_list]
-
-    embeddings.weight.data[digit_idx_list] = torch.FloatTensor(dice_list)
-
-    logger.info("** COMPLETE : Digit embeddings (0~9) replaced with DICE. **")
-
-    return idx2digit, embeddings
 
 
 def main():
@@ -562,11 +515,6 @@ def main():
     if not os.path.isdir(os.path.join(args.output_dir, tokenizer_dir)):
         os.mkdir(os.path.join(args.output_dir, tokenizer_dir))
 
-    if len(os.listdir(os.path.join(args.output_dir, tokenizer_dir))) == 0 and tokenizer.add_tokens([CONTEXT_TOKEN]):  # "[CTX]" at index 30522
-        logger.info("{} added to tokenizer - config.vocab_size : {}".format(CONTEXT_TOKEN, len(tokenizer)))
-        tokenizer.save_pretrained(os.path.join(args.output_dir, tokenizer_dir))
-        logger.info("Tokenizer saved at {}".format(os.path.join(args.output_dir, tokenizer_dir)))
-
     if args.init_weights_dir:
         if args.do_pretrain_ctx:
             model = BertCtxClassifier.from_pretrained(args.init_weights_dir)  # Model for pre-training [CTX] w/ binary classification
@@ -579,12 +527,6 @@ def main():
     
     resized_embeddings = model.resize_token_embeddings(len(tokenizer))
     logger.info("Embedding number: %d", resized_embeddings.num_embeddings)
-
-    # assert resized_embeddings.num_embeddings == model.embed.num_embeddings == model.dec_head.decoder.out_features == model.cls.predictions.decoder.out_features
-
-    if args.surface_form in ["skipconnect", "skipctx", "dicemlp", "diceembed", "diceembed9999", "digitctx", "numeric", "textual"]:
-        # Replace digit embeddings (0~9) to DiceEmbeddings
-        idx2digit, embeddings_pointer = replace_to_dice(args, tokenizer, resized_embeddings, model)
 
     model.to(device)
     if n_gpu > 1:
@@ -734,9 +676,6 @@ def main():
                     mlm_losses.append(-1); mlm_errors.append(-1)
                 
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # Before updating, zero out the gradients for digit-level DiceEmbeddings (0~9) in nn.Embedding (of the model)
-                    if args.surface_form in ["skipconnect", "skipctx", "dicemlp", "diceembed", "diceembed9999", "digitctx", "numeric", "textual"]:  # TODO: May need to comment out upon need
-                        embeddings_pointer.weight.grad[list(idx2digit.keys())] = 0.0
                     optimizer.step()          # update step
                     optimizer.zero_grad()
                     global_step += 1
@@ -1113,9 +1052,6 @@ def inference(args, model, eval_dataloader, device, tokenizer):
     
         prediction = span_pred if all_type_preds[i] else dec_processed
         head_pred = 'span_extraction' if all_type_preds[i] else 'generator'
-
-        # if i == 10:
-        #     exit()
         
         # compute drop em and f1
         drp = DropEmAndF1()
