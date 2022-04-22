@@ -1202,8 +1202,10 @@ class SimpleMLMHead(nn.Module):
 
 
 class BertTransformer(BertPreTrainedModel):
-    '''Bert encoder + Bert decoder with extra mlm, span extraction, etc heads.
-    TODO: for exractive QA, include BIO tagging head.
+    '''
+    Bert encoder + Bert decoder with extra mlm, span extraction, etc heads.
+    For exractive QA, include the BIO tagging head.
+
     '''
     def __init__(self, config):
         super(BertTransformer, self).__init__(config)
@@ -1369,16 +1371,12 @@ class BertTransformer(BertPreTrainedModel):
         for batch_idx in range(encoder_output.size(0)):
             digits = digits_in_input[batch_idx]
             digits_idx = digits_indices[batch_idx]
-            # print("(prev) digits : ", digits)
-            # print("(prev) digits_idx : ", digits_idx)
             # Take care of "." in `digits` and `digits_idx`
             dec_pt_idx = [i for i in range(len(digits)) if not digits[i].isdigit()]
             if len(dec_pt_idx) > 0:
                 digits = np.delete(digits, dec_pt_idx).tolist()
                 digits_idx = np.delete(digits_idx, dec_pt_idx).tolist()
 
-            # print("(after) digits : ", digits)
-            # print("(after) digits_idx : ", digits_idx)
             digits = list(map(float, digits))
             assert len(digits) == len(digits_idx)
             digit_batch.append(torch.tensor(digits).to(encoder_output.device))
@@ -1521,7 +1519,7 @@ class BertTransformer(BertPreTrainedModel):
                 target_ids=None, target_mask=None, answer_as_question_spans=None, answer_as_passage_spans=None,
                 head_type=None, ignore_idx=0, task='', dice_mode=None, dice_load=True, tokenizer=None, max_decoding_steps=20):
         '''
-        - dice_mode : "ctx_only", "dice_only", "merge", "dicemlp", "numeric", "textual", "attnmask"
+        - dice_mode : "localattn"
         - answer_as_question_spans: [bsz, # answers, 2], -1: ignore
         - head_type: [bsz]  0 for decoder, 1 for span-extraction, -1: ignore
         - segment_ids are only used for question, passage mask computation and not for encoding
@@ -1537,7 +1535,7 @@ class BertTransformer(BertPreTrainedModel):
         # encode
         input_mask = self.mask(input_ids, input_mask)
         if dice_mode in ["dicemlp", "digitctx", "numeric", "textual", "diceloss", "localattn"]:
-            # TODO: Change `output_all_encoded_layers` (True / False) to retrieve `all_layer_output`
+            # Change `output_all_encoded_layers` (True / False) to retrieve `all_layer_output`
             output_all_encoded_layers = False
             encoder_output, pooled_output, all_layer_output = self.encode(input_ids, token_type_ids, input_mask, digit_ent_indices, digit_type_indices,
                                                                           random_shift, number_indices=number_indices, ctx_indices=ctx_indices,
@@ -1548,68 +1546,19 @@ class BertTransformer(BertPreTrainedModel):
         # Split `numbers_in_input` to digit-level to calculate dice_loss
         digits_in_input, digits_indices = self.convert_num_to_digit(number_indices, input_ids, tokenizer)
 
-        ''' TODO: Implement the `digit_position_embeddings`
-        # TODO: Need the `digit_position_embeddings` to be added to token_embeddings
-        digit_position_embeddings = self.batch_make_dice(digit_pos)
-        '''
-
-        if dice_mode in ["merged", "dice_only"]:
-            dice_dir = "dice_embeddings"
-            dice_path = "dice.pth"
-            saved_dice_path = os.path.join(".", dice_dir, dice_path)
-            if dice_load and os.path.exists(saved_dice_path):
-                embs_in_passage = []
-                if os.path.exists(saved_dice_path):
-                    dice_dict = torch.load(saved_dice_path)
-                    for nums_input in numbers_in_input:
-                        embs_in_passage.append([dice_dict[num] for num in nums_input])
-                    batch_dice_tensor = torch.as_tensor(embs_in_passage).cuda() if torch.cuda.is_available() else torch.as_tensor(embs_in_passage)
-                    print("batch_dice_tensor (loaded) : ", batch_dice_tensor.size())
-                    exit()
-            else:
-                batch_dice_tensor = self.batch_make_dice(numbers_in_input)
-
         # print("input_ids : ", input_ids)
         # print("input_ids (numbers only) (sample): ", input_ids[0][number_indices[0]])
         # print("encoder_output (shape) : ", encoder_output.size())
 
         # print("numbers_in_input.size() : ", numbers_in_input.size())
         # print("numbers_in_input: ", numbers_in_input)
-        # print("dice_tensor (shape) : ", batch_dice_tensor.size())  # batch_dice_tensor.size() = [batch_size, max_num_size, hidden_size]
         # print("number_indices: ", number_indices)
         # print("number_indices (shape): ", number_indices.size())
-
-        # TODO: Merge / dice_only / ctx_only
-        if dice_mode == "merge" and encoder_output.size(-1) == batch_dice_tensor.size(-1):
-            ctx_dice_tensors = self.concat_ctx_dice(encoder_output, number_indices, batch_dice_tensor)
-            new_num_embeddings = self.locality_inducer(ctx_dice_tensors)  # `new_num_embeddings` are the new embeddings for the numbers
-            # print("new_num_embeddings: ", new_num_embeddings.size())
-            encoder_output = self.replace_ctx_to_merged(encoder_output, new_num_embeddings, number_indices)  # Replace the [CTX] embeddings with new number embeddings from locality inducer
-        elif dice_mode == "dice_only":
-            # Replace number with DiceEmbedding only
-            encoder_output = self.replace_ctx_to_dice(encoder_output, batch_dice_tensor, number_indices)
-        elif dice_mode == "ctx_only":
-            # No need to replace the embedding, since every number is already a [CTX] embedding
-            pass
-        elif dice_mode == "dicemlp":
-            pass
-        elif dice_mode == "reconstruct":
-            pass
-        elif dice_mode == "diceembed":
-            pass
-        elif dice_mode == "digitctx":
-            pass
-        elif dice_mode in ["numeric", "textual", "skipconnect", "skipctx", "diceloss", "localattn"]:
-            pass
-        elif dice_mode is None:
-            pass
-        else:
-            raise ValueError("`dice_mode` only receives one of the following three modes: `merge`, `dice_only`, `ctx_only`.")
         
         only_generative_head = False
         if answer_as_question_spans is None:
             head_type, only_generative_head = torch.zeros_like(input_ids[:, 0]), True
-        
+
         # decode
         target_ids_in, target_ids_out = target_ids[:, :-1], target_ids[:, 1:]
         # subsequent mask is applied inside self.bert
@@ -1638,7 +1587,7 @@ class BertTransformer(BertPreTrainedModel):
             # span_errors, start_preds, end_preds : [bsz]
             # for samples without a valid gold span, log prob is a large -ve val,
             # this'll drive the head_type to choose the generative head.
-            
+
             # answer head type
             type_logits = self.head_type(pooled_output)           # [bsz, 2]
             type_log_probs = nn.LogSoftmax(dim=-1)(type_logits)   # [bsz, 2]
@@ -1651,7 +1600,6 @@ class BertTransformer(BertPreTrainedModel):
             # Calculate number line distance and cosine distance between two numbers
             num_distance, cos_distance = self.calculate_number_dist(encoder_output, digits_in_input, digits_indices, all_layer_output=all_layer_output, metric="cosine")
             # Compute loss for the numeracy loss
-            # TODO: Comment out for no `dice_loss` setting
             dice_loss = None
             dice_loss_fct = MSELoss()
             dice_loss = dice_loss_fct(cos_distance, num_distance)
@@ -1682,59 +1630,17 @@ class BertTransformer(BertPreTrainedModel):
         # encode
         input_mask = self.mask(input_ids, input_mask)
         if dice_mode in ["dicemlp", "digitctx", "diceloss", "attnmask", "localattn"]:
-            print("** ENCODER **")
+            logger.info("** ENCODER **")
             encoder_output, pooled_output, _ = self.encode(input_ids, token_type_ids, input_mask, digit_ent_indices, digit_type_indices,
                                                         random_shift=random_shift, number_indices=number_indices, ctx_indices=ctx_indices)
         else:
             encoder_output, pooled_output, _ = self.encode(input_ids, token_type_ids, input_mask, random_shift)
 
-        dice_dir = "dice_embeddings"
-        dice_path = "dice.pth"
-        saved_dice_path = os.path.join(".", dice_dir, dice_path)
-        if dice_mode in ["merged", "dice_only"]:
-            if dice_load and os.path.exists(saved_dice_path):
-                embs_in_passage = []
-                if os.path.exists(saved_dice_path):
-                    dice_dict = torch.load(saved_dice_path)
-                    for nums_input in numbers_in_input:
-                        embs_in_passage.append([dice_dict[num] for num in nums_input])  # TODO: KeyError may be raised if `num` is not in dice_dict.keys()
-                    batch_dice_tensor = torch.as_tensor(embs_in_passage).cuda() if torch.cuda.is_available() else torch.as_tensor(embs_in_passage)
-                    print("batch_dice_tensor (loaded) : ", batch_dice_tensor.size())
-                    exit()
-            else:
-                batch_dice_tensor = self.batch_make_dice(numbers_in_input)
-
-        # TODO: Merge / dice_only / ctx_only
-        if dice_mode == "merge" and encoder_output.size(-1) == batch_dice_tensor.size(-1):
-            ctx_dice_tensors = self.concat_ctx_dice(encoder_output, number_indices, batch_dice_tensor)
-            new_num_embeddings = self.locality_inducer(ctx_dice_tensors)  # `new_num_embeddings` are the new embeddings for the numbers
-            # print("new_num_embeddings: ", new_num_embeddings.size())
-            encoder_output = self.replace_ctx_to_merged(encoder_output, new_num_embeddings, number_indices)  # Replace the [CTX] embeddings with new number embeddings from locality inducer
-        elif dice_mode == "dice_only":
-            # Replace number with DiceEmbedding only
-            encoder_output = self.replace_ctx_to_dice(encoder_output, batch_dice_tensor, number_indices)
-        elif dice_mode == "ctx_only":
-            pass
-        elif dice_mode == "dicemlp":
-            pass
-        elif dice_mode == "reconstruct":
-            pass
-        elif dice_mode == "diceembed":
-            pass
-        elif dice_mode == "digitctx":
-            pass
-        elif dice_mode in ["numeric", "textual", "diceloss", "localattn", "weightedattn"]:
-            pass
-        elif dice_mode is None:
-            pass
-        else:
-            raise ValueError("`dice_mode` only receives one of the following three modes: `merge`, `dice_only`, `ctx_only`.")
-
         # decode
         # max_decoding_steps: drop: 20,  numeric syn data: 11
         start_ids = torch.zeros_like(input_ids[:, 0]) + start_tok_id
         dec_out_ids = start_ids if start_ids.dim() > 1 else start_ids.unsqueeze(1) # [bsz, 1]
-        print("** DECODER **")
+        logger.info("** DECODER **")
         for i in range(max_decoding_steps - 1): # -1 as we included end_tok in max_decoding_steps
             # subsequent mask is applied inside self.bert
             dec_out, _ = self.bert(dec_out_ids, attention_mask=self.mask(dec_out_ids), digit_ent_indices=digit_ent_indices, digit_type_indices=digit_type_indices,

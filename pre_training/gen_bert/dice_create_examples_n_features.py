@@ -47,9 +47,6 @@ class DropExample(object):
                  numbers_in_question=None,
                  q_number_indices=None,
                  num_ent_indices=None,
-                 q_ctx_indices=None,
-                 ctx_indices=None,
-                 local_ctx_tokens=None,
                  answer_type=None,
                  number_of_answer=None,
                  passage_spans=None,
@@ -68,9 +65,6 @@ class DropExample(object):
         self.numbers_in_question = numbers_in_question
         self.q_number_indices = q_number_indices
         self.num_ent_indices = num_ent_indices
-        self.q_ctx_indices = q_ctx_indices
-        self.ctx_indices = ctx_indices
-        self.local_ctx_tokens = local_ctx_tokens
         self.answer_type = answer_type
         self.number_of_answer = number_of_answer
         self.passage_spans = passage_spans
@@ -94,12 +88,8 @@ class DropExample(object):
             s += ", \nnumbers_in_question: {}".format(self.numbers_in_question)
         if self.q_number_indices:
             s += ", \nq_number_indices: {}".format(self.q_number_indices)
-        if self.q_ctx_indices:
-            s += ", \nq_ctx_indices: {}".format(self.q_ctx_indices)
         if self.num_ent_indices:
             s += ", \nnum_ent_indices: {}".format(self.num_ent_indices)
-        if self.ctx_indices:
-            s += ", \nctx_indices: {}".format(self.ctx_indices)
         if self.local_ctx_tokens:
             s += ", \nlocal_ctx_tokens: {}".format(self.local_ctx_tokens)
         if self.answer_type:
@@ -135,8 +125,6 @@ class DropFeatures(object):
                  digit_ent_indices=None,
                  digit_type_indices=None,
                  digit_pos=None,
-                 ctx_indices=None,
-                 ctx_labels=None,
                  start_indices=None,
                  end_indices=None,
                  number_of_answers=None,
@@ -155,8 +143,6 @@ class DropFeatures(object):
         self.digit_ent_indices = digit_ent_indices
         self.digit_type_indices = digit_type_indices
         self.digit_pos = digit_pos
-        self.ctx_indices = ctx_indices
-        self.ctx_labels = ctx_labels
         self.start_indices = start_indices
         self.end_indices = end_indices
         self.number_of_answers = number_of_answers
@@ -271,8 +257,8 @@ class DropReader(object):
 
                 try:
                     example, passage_tokens, sentence_id = self.text_to_example(question_text, passage_text, passage_id, question_id, answer_annotations, passage_tokens, sentence_id)
-                except TypeError:
-                    pass  # TODO: Resolve the `TypeError`
+                except TypeError as e:
+                    print(e)
                     
                 if example is not None:
                     examples.append(example)
@@ -284,13 +270,13 @@ class DropReader(object):
         return examples
     
     def text_to_example(self,  # type: ignore
-                         question_text: str,
-                         passage_text: str,
-                         passage_id: str,
-                         question_id: str,
-                         answer_annotations: List[Dict] = None,
-                         passage_tokens: List[Token] = None,
-                         sentence_id: List[Token] = None):
+                        question_text: str,
+                        passage_text: str,
+                        passage_id: str,
+                        question_id: str,
+                        answer_annotations: List[Dict] = None,
+                        passage_tokens: List[Token] = None,
+                        sentence_id: List[Token] = None):
 
         # Use Stanza to extract NER
         bio_pattern = re.compile(r"[A-Z]-")
@@ -330,7 +316,7 @@ class DropReader(object):
             number_of_answer = min(len(answer_texts), self.max_number_of_answer)
         
         if answer_type is None or (answer_type == 'spans' and len(answer_texts) > 1 and not self.include_multi_span): 
-            return None # multi-span
+            return None  # multi-span
         
         # Tokenize the answer text in order to find the matched span based on token
         tokenized_answer_texts = []
@@ -350,15 +336,7 @@ class DropReader(object):
             for token in tokens:
                 number = self.get_number_from_word(token.text)
                 if number is not None and self.preprocess_type not in ["surround", "digitctx", "skipctx"]:  # `skipctx` - skipconnect + [CTX] token / `skipconnect` - skipconnect only
-                    new_tokens.append(Token(str(number)))  # This will handle the `skipconnect` case
-                elif number is not None and self.preprocess_type in ["surround"]:
-                    new_tokens.append(Token(CONTEXT_TOKEN))
                     new_tokens.append(Token(str(number)))
-                    new_tokens.append(Token(CONTEXT_END))
-                elif number is not None and self.preprocess_type in ["digitctx", "skipctx"]:
-                    new_tokens.append(Token(str(number)))
-                    if not is_answer_text:
-                        new_tokens.append(Token(CONTEXT_TOKEN))
                 else:
                     new_tokens.append(token)
             return new_tokens
@@ -367,7 +345,7 @@ class DropReader(object):
 
         tokenized_answer_texts_list = copy.deepcopy(tokenized_answer_texts)
         tokenized_answer_texts = []
-        for answer_tokens in tokenized_answer_texts_list:  # (E.g.,) `tokenized_answer_texts = [[100, Peso, note], [500, Peso, note]]`
+        for answer_tokens in tokenized_answer_texts_list:  # (E.g., `tokenized_answer_texts = [[100, Peso, note], [500, Peso, note]]`)
             tokenized_answer_texts.append(_normalize_number_tokens(answer_tokens, is_answer_text=True))
 
         normalized_answer_texts = list(map(lambda l: ' '.join([t.text for t in l]), tokenized_answer_texts))
@@ -388,14 +366,14 @@ class DropReader(object):
 
         sent2num = defaultdict(list)
         sent2ent = defaultdict(list)
-        for token_index, token in enumerate(passage_tokens):  # Save numbers within the passage for later (For DiceEmbedding)
+        for token_index, token in enumerate(passage_tokens):  # Save entities and their indices for ent-num channel
             if token.ent_type_ in entity_types:
                 ents_in_passage.append(token.text)
                 ent_indices.append(token_index)
                 sent2ent[sentence_id[token_index]].append(token_index)
 
             number = self.get_number_from_word(token.text)
-            if number is not None:
+            if number is not None:  # Save number in the passage for the three channels
                 numbers_in_passage.append(number)
                 number_indices.append(token_index)
                 sent2num[sentence_id[token_index]].append(token_index)
@@ -438,31 +416,6 @@ class DropReader(object):
 
         # exit()
 
-        def _replace_num2ctx(tokens: List[Token]) -> List[Token]:
-            new_tokens = []
-            for token in tokens:
-                ctx_tok = self.replace_number2ctx(token.text, self.include_more_numbers)
-                if ctx_tok == CONTEXT_TOKEN:
-                    new_tokens.append(Token(ctx_tok))
-                else:
-                    new_tokens.append(Token(token.text))
-            return new_tokens
-
-        q_ctx_indices = None
-        ctx_indices = None
-        local_ctx_tokens = None
-        if self.preprocess_type in ["local_ctx", "pretrain_ctx"]:
-            passage_tokens = _replace_num2ctx(passage_tokens)  # Convert the numbers in passage to [CTX]
-            question_tokens = _replace_num2ctx(question_tokens)  # Convert the numbers in question to [CTX]
-            # Add labels for the [CTX] pre-training task - Predict the tokens within window size `k`
-            ctx_indices, _ = self.extract_ctx_labels(2, passage_tokens)
-            assert number_indices == ctx_indices  # `number_indices` and `ctx_indices` should be the same
-        elif self.preprocess_type == "digitctx":
-            q_ctx_indices, _ = self.extract_ctx_labels(2, question_tokens)
-            ctx_indices, _ = self.extract_ctx_labels(2, passage_tokens)
-        else:
-            pass
-
         valid_passage_spans = \
             self.find_valid_spans(passage_tokens, tokenized_answer_texts) if tokenized_answer_texts else []
         valid_question_spans = \
@@ -484,9 +437,6 @@ class DropReader(object):
             numbers_in_question=numbers_in_question,
             q_number_indices=q_number_indices,
             num_ent_indices=num_ent_indices,
-            q_ctx_indices=q_ctx_indices,
-            ctx_indices=ctx_indices,
-            local_ctx_tokens=local_ctx_tokens,
             answer_type=answer_type,
             number_of_answer=number_of_answer,
             passage_spans=valid_passage_spans,
@@ -524,67 +474,6 @@ class DropReader(object):
             # answer_content is a string of number
             answer_texts = [answer_content]
         return answer_type, answer_texts
-
-
-    @staticmethod
-    def extract_ctx_labels(k: int, passage_tokens: List[Token]):
-        '''
-        k - size of the window
-        passage_tokens - passage_tokens tokenized by allennlp.WordTokenizer()
-        '''
-        ctx_indices = []  # [CTX] token indices in passage_tokens
-        local_ctx_tokens = []
-        for i, token in enumerate(passage_tokens):
-            if token.text == CONTEXT_TOKEN:
-                ctx_indices.append(i)
-                if i >= k and i < len(passage_tokens) - k:
-                    local_ctx_tokens.append(passage_tokens[i - k : i] + passage_tokens[i + 1 : i + k + 1])
-                elif i < k:
-                    local_ctx_tokens.append(passage_tokens[:i] + passage_tokens[i + 1 : i + k + 1])
-                elif len(passage_tokens) - i - 1 < k:
-                    local_ctx_tokens.append(passage_tokens[i - k : i] + passage_tokens[i + 1 :])
-
-        return ctx_indices, local_ctx_tokens
-
-    @staticmethod
-    def replace_number2ctx(word: str, try_to_include_more_numbers=True):
-        """
-        Returns a new list of tokens with numbers replaced with [CTX] special token (i.e., local context aggregator)
-        """
-        if try_to_include_more_numbers:
-            # strip all punctuations from the sides of the word, except for the negative sign
-            punctuations = string.punctuation.replace('-', '')
-            word = word.strip(punctuations)
-            # some words may contain the comma as deliminator
-            word = word.replace(",", "")
-            # word2num will convert hundred, thousand ... to number, but we skip it.
-            if word in ["hundred", "thousand", "million", "billion", "trillion"]:
-                return None
-            try:
-                number = word_to_num(word)
-            except ValueError:
-                try:
-                    number = int(word)
-                except ValueError:
-                    try:
-                        number = float(word)
-                    except ValueError:
-                        number = None
-            if number is not None and (isinstance(number, int) or isinstance(number, float)):
-                return CONTEXT_TOKEN
-            return number
-        else:
-            no_comma_word = word.replace(",", "")
-            if no_comma_word in WORD_NUMBER_MAP:
-                number = WORD_NUMBER_MAP[no_comma_word]
-            else:
-                try:
-                    number = int(no_comma_word)
-                except ValueError:
-                    number = None
-            if number is not None and (isinstance(number, int) or isinstance(number, float)):
-                return CONTEXT_TOKEN
-            return numberWWW
 
     @staticmethod
     def get_number_from_word(word: str, improve_number_extraction=True):
@@ -639,7 +528,6 @@ class DropReader(object):
                         return None
 
         return number
-
 
     @staticmethod
     def convert_word_to_number(word: str, try_to_include_more_numbers=False, normalized_tokens=None, token_index=None):
@@ -756,40 +644,18 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
     logger.info('Creating features from `examples (DropExample -> DropFeatures)`')
     unique_id = 1000000000
     skip_count, truncate_count = 0, 0
-    ctx_idx = tokenizer.convert_tokens_to_ids(CONTEXT_TOKEN.lower())
     
-    # tokenize = (lambda s: split_digits(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
-
     tokenize = (lambda s: split_digits_nonsubwords(tokenizer.tokenize(s))) if indiv_digits else tokenizer.tokenize
     
     features, all_qp_lengths = [], []
     for (example_index, example) in enumerate(tqdm(examples)):
-        ctx_labels = []  # [CTX] indices : 0 - non-number, 1 - number
-        is_num = 1
-        not_num = 0
-        toks_replaced = []
-
         que_tok_to_orig_index = []
         que_orig_to_tok_index = []
         all_que_tokens = []
         for (i, token) in enumerate(example.question_tokens):
             que_orig_to_tok_index.append(len(all_que_tokens))
             sub_tokens = tokenize(token)  # Further tokenize tokens using transformers tokenizer (e.g., BertTokenizer)
-
-            if preprocess_type == "pretrain_ctx" and len(sub_tokens) <= 1:
-                if token.lower() == CONTEXT_TOKEN.lower():
-                    # (1) Label [CTX] as 'numbers' (label = 1)
-                    ctx_labels.append(is_num)
-                # Number of non-number tokens as [CTX] == Number of number tokens as [CTX]
-                elif len(all_que_tokens) > 2 and i < len(example.question_tokens) - 1:
-                    if random.random() <= 0.15 and len(toks_replaced) < len(example.ctx_indices) and \
-                        CONTEXT_TOKEN.lower() != all_que_tokens[i - 1].lower() and CONTEXT_TOKEN.lower() != example.question_tokens[i + 1].lower():
-                        # (2) Replace non-number token (that is not sub-tokenized) (label = 0)
-                        toks_replaced.append(token)
-                        sub_tokens = [CONTEXT_TOKEN.lower()]
-                        ctx_labels.append(not_num)
-
-            que_tok_to_orig_index += [i]*len(sub_tokens)
+            que_tok_to_orig_index += [i] * len(sub_tokens)
             all_que_tokens += sub_tokens
 
         # List up all the entities
@@ -803,32 +669,18 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
         doc_orig_to_tok_index = []
         all_doc_tokens = []
         num_subent_indices = defaultdict(list)  # Number (not yet sub-tokenized) to entity (sub-tokenized) index
-
         for (i, token) in enumerate(example.passage_tokens):
             doc_orig_to_tok_index.append(len(all_doc_tokens))
             sub_tokens = tokenize(token)
-
-            if preprocess_type == "pretrain_ctx" and len(sub_tokens) <= 1:
-                if token.lower() == CONTEXT_TOKEN.lower():
-                    # (1) Label [CTX] as 'numbers' (label = 1)
-                    ctx_labels.append(is_num)
-                # Number of non-number tokens as [CTX] == Number of number tokens as [CTX]
-                elif len(all_doc_tokens) > 2 and i < len(example.passage_tokens) - 1:
-                    if random.random() <= 0.15 and len(toks_replaced) < len(example.ctx_indices) and \
-                        CONTEXT_TOKEN.lower() != all_doc_tokens[i - 1].lower() and CONTEXT_TOKEN.lower() != example.passage_tokens[i + 1].lower():
-                        # (2) Replace non-number token (that is not sub-tokenized) (label = 0)
-                        toks_replaced.append(token)
-                        sub_tokens = [CONTEXT_TOKEN.lower()]
-                        ctx_labels.append(not_num)
-
-            if preprocess_type == "localattn" and example.num_ent_indices is not None and i in ent_num_indices.keys():  # Change whole word entities into sub-word entities
+            # Change whole word entities into sub-word entities
+            if preprocess_type == "localattn" and example.num_ent_indices is not None and i in ent_num_indices.keys():
                 for num_idx in ent_num_indices[i]:
                     num_idx = num_idx if isinstance(num_idx, list) else [num_idx]
                     for ni in num_idx:
-                        # (Number index) - to - (subword tokenized entity index)
+                        # (Number index) to (subword tokenized entity index)
                         num_subent_indices[ni] += list(range(len(all_doc_tokens), len(all_doc_tokens) + len(sub_tokens)))
 
-            doc_tok_to_orig_index += [i]*len(sub_tokens)
+            doc_tok_to_orig_index += [i] * len(sub_tokens)
             all_doc_tokens += sub_tokens
 
         original_passage_length = len(all_doc_tokens)
@@ -850,11 +702,10 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
 
         tok_q_number_indices = []
         tok_number_indices = []
-        tok_q_digit_pos = []  # TODO: Implement the `digit_pos` for every single digit (for calculating the digit_loss)
+        tok_q_digit_pos = []  # `digit_pos` for every single digit (for calculating the dice_loss)
         tok_digit_pos = []
-        tok_q_ctx_indices = []
-        tok_ctx_indices = []
-        if preprocess_type in ["diceloss", "localattn", "digitctx", "numeric", "textual"]:
+
+        if preprocess_type in ["localattn", "numeric", "textual"]:
             # These is a list of every index of numeric wps of original number token (example.q_number_indices) - `question`
             assert len(example.numbers_in_question) == len(example.q_number_indices)
 
@@ -866,23 +717,16 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
                     for i, subtok_index in enumerate(subtoken_indices):
                         if subtok_index < len(all_que_tokens):
                             tok_q_number_indices.append(subtok_index)
-
-                            # TODO: Adding "digit position" for every number (for every digit)
-                            tok_q_digit_pos.append(len(subtoken_indices) - 1 - i)
-
-                    if example.q_ctx_indices is not None and tok_q_number_indices[-1] < len(all_que_tokens):
-                        tok_q_ctx_indices.append(tok_q_number_indices[-1] + 1)  # [CTX] index comes right after every number
-
+                            tok_q_digit_pos.append(len(subtoken_indices) - 1 - i)  # Adding "digit position" (in exponent) for every number (for every digit)
                 else:
                     tok_q_number_indices.append(-1)
                     tok_q_digit_pos.append(-1)
-                    tok_q_ctx_indices.append(-1)
 
             # These is a list of every index of numeric wps of original number token (example.number_indices) - `passage`
             assert len(example.numbers_in_passage) == len(example.number_indices)
             assert len(tok_q_number_indices) == len(tok_q_digit_pos)
 
-            digit_ent_indices = defaultdict(list)  # digit-level index as key / sub-word tokenize entity index as value
+            digit_ent_indices = defaultdict(list)  # digit-level index as key / subword tokenized entity index as value
             digit_type_indices = defaultdict(list)  # digit-level index as key / surrounding "type-defining" words as value (window size = k)
             window_size = 2  # Defining the scope of the surrounding words to look at (number type definition)
 
@@ -898,17 +742,11 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
                             if index in num_subent_indices.keys():
                                 digit_ent_indices[subtok_index] += num_subent_indices[index]
                                 digit_type_indices[subtok_index] += list(range(subtoken_indices[0] - window_size, subtoken_indices[0])) + list(range(subtoken_indices[-1] + 1, subtoken_indices[-1] + window_size + 1))
-                    
                             # Adding "digit position" for every number (for every digit)
                             tok_digit_pos.append(len(subtoken_indices) - 1 - i)
-
-                    if example.ctx_indices is not None and tok_number_indices[-1] + 1 < len(all_doc_tokens):
-                        tok_ctx_indices.append(tok_number_indices[-1] + 1)  # [CTX] index comes right after every number
-
                 else:
                     tok_number_indices.append(-1)
                     tok_digit_pos.append(-1)
-                    tok_ctx_indices.append(-1)
 
             assert len(tok_number_indices) == len(tok_digit_pos)
 
@@ -945,9 +783,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
 
         # exit()
 
-        if original_passage_length == len(all_doc_tokens) and preprocess_type not in ["dicemlp", "digitctx", "numeric", "textual", "diceloss", "localattn"]:
-            # Assert only when the numbers are split into "digit-level"
-            assert len(example.number_indices) == len(tok_number_indices)
+        if original_passage_length == len(all_doc_tokens) and preprocess_type not in ["numeric", "textual", "localattn"]:
+            assert len(example.number_indices) == len(tok_number_indices)  # Assert only when the numbers are split into "digit-level"
 
         tokens, segment_ids = [], []
         que_token_to_orig_map = {}
@@ -957,13 +794,13 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
             que_token_to_orig_map[len(tokens)] = que_tok_to_orig_index[i]
             tokens.append(all_que_tokens[i])
         tokens.append("[SEP]")
-        segment_ids += [0]*len(tokens)
+        segment_ids += [0] * len(tokens)
 
         for i in range(len(all_doc_tokens)):
             doc_token_to_orig_map[len(tokens)] = doc_tok_to_orig_index[i]
             tokens.append(all_doc_tokens[i])
         tokens.append("[SEP]")
-        segment_ids += [1]*(len(tokens) - len(segment_ids))
+        segment_ids += [1] * (len(tokens) - len(segment_ids))
         
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
         # The mask has 1 for real tokens and 0 for padding tokens. Only real
@@ -973,16 +810,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
         assert len(segment_ids) == len(input_ids)
         
         # we expect the generative head to output the wps of the joined answer text
-        answer_text = (SPAN_SEP+' ').join(example.answer_texts).strip()
-        
-        # if example.answer_type == "number":
-        #     # TODO: If answer_type == "number", reverse the dec_id sequence
-        #     answer_texts = []
-        #     if isinstance(example.answer_texts, list):
-        #         for ans_txt in example.answer_texts:
-        #             answer_texts.append(ans_txt[::-1])  # Reverse the number answer
-        #     answer_text = (SPAN_SEP+' ').join(answer_texts).strip()
-        #     # print("example.answer_text: {} / answer_text: {}".format(example.answer_texts, answer_text))
+        answer_text = (SPAN_SEP + ' ').join(example.answer_texts).strip()
 
         dec_toks = [START_TOK] + tokenize(answer_text) + [END_TOK]
         # ending the number with a '\\' to signify end
@@ -1005,14 +833,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
                 q_number_indices.append(-1)
         
         numbers_in_question = example.numbers_in_question[:len(q_number_indices)]  # The actual numbers extracted from the question
-
-        q_ctx_indices = []
-        for tok_q_ctx_index in tok_q_ctx_indices:
-            if tok_q_ctx_index != -1:
-                q_ctx_index = tok_q_ctx_index + que_offset
-                q_ctx_indices.append(q_ctx_index)
-            else:
-                q_ctx_indices.append(-1)
 
         number_indices = []  # again these are the starting indices of wps of an orig number token - `passage`
         doc_offset = len(all_que_tokens) + 2
@@ -1037,16 +857,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
             # type_idx = type_idx if isinstance(type_idx, list) else [type_idx]
             if digit_idx != -1 and digit_idx + doc_offset < max_seq_length:
                 new_digit_type_indices[digit_idx + doc_offset] += [i + doc_offset for i in type_idx if i + doc_offset < max_seq_length - 1]
-        
-        ctx_indices = []
-        for tok_ctx_index in tok_ctx_indices:
-            if tok_ctx_index != -1:
-                ctx_index = tok_ctx_index + doc_offset
-                ctx_indices.append(ctx_index)
-            else:
-                ctx_indices.append(-1)
 
-        if preprocess_type not in ["dicemlp", "digitctx", "numeric", "textual", "diceloss", "localattn"]:
+        if preprocess_type not in ["numeric", "textual", "localattn"]:
             assert len(numbers_in_question) == len(q_number_indices)
             assert len(numbers_in_passage) == len(number_indices)
 
@@ -1054,15 +866,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
         numbers_in_input = numbers_in_question + numbers_in_passage
         number_indices = q_number_indices + number_indices
         digit_pos = tok_q_digit_pos + tok_digit_pos
-        ctx_indices = q_ctx_indices + ctx_indices
 
         assert len(number_indices) == (len(tok_q_digit_pos) + len(tok_digit_pos))
-        
-        if preprocess_type == "pretrain_ctx":
-            ctx_indices = np.where(np.array(tokens) == CONTEXT_TOKEN.lower())[0].tolist()  # Simply locate the [CTX] tokens
-            truncated_ctx_len = len(ctx_indices)
-            ctx_labels = ctx_labels[:truncated_ctx_len]
-            assert len(ctx_labels) == len(ctx_indices) == tokens.count(CONTEXT_TOKEN.lower())
 
         # print("\nINPUT: ", tokens)
         # print("\nnumbers_in_question: ", numbers_in_question)
@@ -1100,7 +905,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
         if start_indices != [] and end_indices != []:
             assert example.number_of_answer is not None
             number_of_answers.append(example.number_of_answer - 1)
-            
+
         features.append(DropFeatures(
                 unique_id=unique_id,
                 example_index=example_index,
@@ -1116,8 +921,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_decodi
                 digit_ent_indices=new_digit_ent_indices,
                 digit_type_indices=new_digit_type_indices,
                 digit_pos=digit_pos,
-                ctx_indices=ctx_indices,
-                ctx_labels=ctx_labels,
                 start_indices=start_indices,
                 end_indices=end_indices,
                 number_of_answers=number_of_answers,
@@ -1141,6 +944,7 @@ def read_file(file):
         with open(file, 'rb') as f:
             return pickle.load(f)
 
+
 def write_file(data, file):
     if file.endswith('jsonl'):
         with jsonlines.open(file, mode='w') as writer:
@@ -1154,6 +958,7 @@ def write_file(data, file):
         with open(file, 'wb') as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+
 def main():
     parser = argparse.ArgumentParser(description='Used to make examples, features from DROP-like dataset.')
     parser.add_argument("--drop_json", default='drop_dataset_dev.json', type=str, help="The eval .json file.")
@@ -1163,7 +968,7 @@ def main():
     parser.add_argument("--max_seq_length", default=512, type=int, help="max seq len of [cls] q [sep] p [sep]")
     parser.add_argument("--max_decoding_steps", default=20, type=int, help="max tokens to be generated by decoder")
     parser.add_argument("--percent", default="all", type=str, help="Percentage of drop_dataset_train for sample efficiency test.")
-    parser.add_argument("--preprocess_type", default="digitctx", type=str, help="Keyword for preprocessing type - `local_ctx`, `surround`, `pretrain_ctx`, `numeric`, `textual`")
+    parser.add_argument("--preprocess_type", default="localattn", type=str, help="Keyword for preprocessing type - `localattn`, `numeric`, `textual`")
 
     args = parser.parse_args()
     
@@ -1185,7 +990,7 @@ def main():
         preprocess_type=args.preprocess_type,
         logger=logger)
 
-    print("*** convert_examples_to_features done! ***")
+    logger.info("*** convert_examples_to_features completed ***")
 
     os.makedirs(args.output_dir, exist_ok=True)
     split = 'train' if args.split == 'train' else 'eval'
