@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=$3 python dice_create_examples_n_features.py --split $1 --drop_json ../data/drop_dataset/drop_dataset_dev.json --output_dir data/examples_n_features --max_seq_length 512 --percent all --preprocess_type $2
