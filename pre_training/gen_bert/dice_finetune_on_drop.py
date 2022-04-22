@@ -115,7 +115,7 @@ class MLMDataset(TensorDataset):
 
 
 ModelFeatures = namedtuple("ModelFeatures", "example_id input_ids input_mask segment_ids label_ids head_type q_spans p_spans \
-                            numbers_in_input number_indices ctx_indices ctx_labels digit_pos digit_ent_indices digit_type_indices")
+                            numbers_in_input number_indices digit_pos digit_ent_indices digit_type_indices")
 
 
 class DropDataset(TensorDataset):
@@ -183,11 +183,8 @@ class DropDataset(TensorDataset):
         self.head_type = torch.tensor([f.head_type for f in features]).long()
         self.q_spans = torch.tensor([f.q_spans for f in features]).long()
         self.p_spans = torch.tensor([f.p_spans for f in features]).long()
-        # `number_in_input` and `number_indices` are for DiceEmbeddings to merge with [CTX] embeddings after encoding.
         self.numbers_in_input = torch.tensor([f.numbers_in_input for f in features]).float()  # Floating-point values exist
         self.number_indices = torch.tensor([f.number_indices for f in features]).long()
-        self.ctx_indices = torch.tensor([f.ctx_indices for f in features]).long()
-        self.ctx_labels = torch.tensor([f.ctx_labels for f in features]).long()
         self.digit_pos = torch.tensor([f.digit_pos for f in features]).long()
         self.digit_ent_indices = [f.digit_ent_indices for f in features]
         self.digit_type_indices = [f.digit_type_indices for f in features]
@@ -198,11 +195,10 @@ class DropDataset(TensorDataset):
     def __getitem__(self, item):
         return (self.input_ids[item], self.input_mask[item], self.segment_ids[item], self.label_ids[item],
                 self.head_type[item], self.q_spans[item], self.p_spans[item], self.numbers_in_input[item], self.number_indices[item],
-                self.ctx_indices[item], self.ctx_labels[item], self.digit_pos[item], self.digit_ent_indices[item], self.digit_type_indices[item])
+                self.digit_pos[item], self.digit_ent_indices[item], self.digit_type_indices[item])
     
     def convert_to_input_features(self, drop_example, drop_feature):
         # print(" ** convert_to_input_features ** ")
-
         max_seq_len = drop_feature.max_seq_length
         max_number_of_nums = max_seq_len // 2 if self.args.surface_form not in ["numeric", "textual"] else max_seq_len  # Maximum number of "numbers" in the given passage
         max_number_of_ctx = max_seq_len // 2  # Maximum number of "[CTX]" tokens in the given passage
@@ -277,19 +273,9 @@ class DropDataset(TensorDataset):
             print("numbers_indices: ", len(number_indices))
             print("digit_pos: ", len(digit_pos))
             print(e)
-        
-        ctx_indices = []
-        ctx_labels = []
-        if self.args.surface_form in ["pretrain_ctx", "digitctx", "attnmask"]:
-            ctx_indices = drop_feature.ctx_indices
-            ctx_labels = drop_feature.ctx_labels
-            if len(ctx_indices) < max_number_of_ctx:
-                ctx_pad = -1
-                ctx_indices += [ctx_pad] * (max_number_of_ctx - len(ctx_indices))
-                ctx_labels += [ctx_pad] * (max_number_of_ctx - len(ctx_labels))
 
         return ModelFeatures(drop_feature.example_index, input_ids, input_mask, segment_ids,
-                             decoder_label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices, ctx_indices, ctx_labels, digit_pos, digit_ent_indices, digit_type_indices)
+                             decoder_label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices, digit_pos, digit_ent_indices, digit_type_indices)
 
 
 def collate_batch(batch):
@@ -297,7 +283,7 @@ def collate_batch(batch):
     batch - List of DropFeature instances of length batch_size
     '''
     input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans = [], [], [], [], [], [], []
-    numbers_in_input, number_indices, ctx_indices, ctx_labels, digit_pos, digit_ent_indices, digit_type_indices = [], [], [], [], [], [], []
+    numbers_in_input, number_indices, digit_pos, digit_ent_indices, digit_type_indices = [], [], [], [], []
     for i in range(len(batch)):
         input_ids.append(batch[i][0])
         input_mask.append(batch[i][1])
@@ -308,11 +294,9 @@ def collate_batch(batch):
         p_spans.append(batch[i][6])
         numbers_in_input.append(batch[i][7])
         number_indices.append(batch[i][8])
-        ctx_indices.append(batch[i][9])
-        ctx_labels.append(batch[i][10])
-        digit_pos.append(batch[i][11])
-        digit_ent_indices.append(batch[i][12])
-        digit_type_indices.append(batch[i][13])
+        digit_pos.append(batch[i][9])
+        digit_ent_indices.append(batch[i][10])
+        digit_type_indices.append(batch[i][11])
 
     input_ids = torch.stack(input_ids)
     input_mask = torch.stack(input_mask)
@@ -323,11 +307,9 @@ def collate_batch(batch):
     p_spans = torch.stack(p_spans)
     numbers_in_input = torch.stack(numbers_in_input)
     number_indices = torch.stack(number_indices)
-    ctx_indices = torch.stack(ctx_indices)
-    ctx_labels = torch.stack(ctx_labels)
 
     new_batch = (input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans,
-                 numbers_in_input, number_indices, ctx_indices, ctx_labels, digit_pos, digit_ent_indices, digit_type_indices)
+                 numbers_in_input, number_indices, digit_pos, digit_ent_indices, digit_type_indices)
     
     return new_batch
 
@@ -490,10 +472,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     if not args.do_train and not args.do_eval:
-        if args.do_pretrain_ctx:
-            pass
-        else:
-            raise ValueError("At least one of `do_train` or `do_eval` must be True.")
+        raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     if args.do_train:
         make_output_dir(args, scripts_to_save=[sys.argv[0], 'modeling.py', 'create_examples_n_features.py'])
@@ -613,13 +592,13 @@ def main():
                 digit_ent_indices = batch[-2]
                 digit_type_indices = batch[-1]
                 batch = tuple(t.to(device) for t in batch[:-3])
-                input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices, ctx_indices, ctx_labels = batch
+                input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices = batch
 
                 # print("text: ", tokenizer.convert_ids_to_tokens(input_ids[0]))
 
-                losses = model(input_ids, segment_ids, input_mask, numbers_in_input, number_indices, ctx_indices, digit_pos, digit_ent_indices, digit_type_indices,
+                losses = model(input_ids, segment_ids, input_mask, numbers_in_input, number_indices, digit_pos, digit_ent_indices, digit_type_indices,
                                random_shift=args.random_shift, target_ids=label_ids, target_mask=None, answer_as_question_spans=q_spans, answer_as_passage_spans=p_spans,
-                               head_type=head_type, dice_mode=args.surface_form, dice_load=True, tokenizer=tokenizer)
+                               head_type=head_type, dice_mode=args.surface_form, tokenizer=tokenizer)
                 loss, errs, dec_loss, dec_errors, span_loss, span_errors, type_loss, type_errors, type_preds, dice_loss, scalar_loss = losses
                 
                 # aggregate on multi-gpu
@@ -718,154 +697,6 @@ def main():
         tb_writer.export_scalars_to_json(os.path.join(args.output_dir, 'training_scalars.json'))
         tb_writer.close()
 
-    if args.do_pretrain_ctx:
-        '''
-        Pre-training step to utilize [CTX] - binary classification to classify `number` and `non-number` for every [CTX] token replacing the original tokens
-        '''
-        # Prepare data loader
-        train_data = DropDataset(args, 'train')
-        train_sampler = RandomSampler(train_data)
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
-
-        num_train_optimization_steps = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
-        
-        # Prepare optimizer
-        param_optimizer = list(model.named_parameters())
-
-        # hack to remove pooler, which is not used
-        # thus it produce None grad that breaks apex
-        param_optimizer = [n for n in param_optimizer]
-
-        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-            {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-            ]
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                     lr=args.learning_rate,
-                     warmup=args.warmup_proportion,
-                     t_total=num_train_optimization_steps)
-        
-        logger.info("***** Running training *****")
-        logger.info("  Num examples = %d", len(train_data))
-        logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_optimization_steps)
-
-        # using fp16
-        fp16 = False
-
-        tb_writer = SummaryWriter(os.path.join(args.output_dir, 'log'))  # tensorboard
-
-        model.train()
-        (global_step, all_losses, eval_errors, best, best_mlm, t_prev, do_eval) = 0, [], [], 1000, 1000, time.time(), False
-        
-        for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
-                # grads wrt to train data
-                batch = tuple(t.to(device) for t in batch)
-                input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices, ctx_indices, ctx_labels = batch
-
-                outputs = model(input_ids, segment_ids, input_mask, random_shift=args.random_shift, ignore_idx=-1, labels=ctx_labels, ctx_indices=ctx_indices)
-                loss, logits = outputs
-                
-                if args.gradient_accumulation_steps > 1:
-                    loss = loss / args.gradient_accumulation_steps
-                all_losses.append(loss.item())
-
-                if fp16:
-                    with amp.scale_loss(loss, optimizer) as scaled_loss:
-                        scaled_loss.backward()
-                else:
-                    loss.backward()
-
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    optimizer.step()          # update step
-                    optimizer.zero_grad()
-                    global_step += 1
-                    
-                train_result = {'trn_loss': all_losses[-1], 'lr': optimizer.get_lr()[0], 'epoch': epoch}
-
-                tb_writer.add_scalars('train', train_result, len(all_losses))
-
-                # if do_eval or (step + 1) % args.log_eval_step == 0:
-                if do_eval:
-                    do_eval = False
-                    eval_result = evaluate_pretrain_ctx(args, model, eval_dataloader, device, len(train_data))
-                    eval_err = eval_result['eval_err']
-                    if eval_err < best or (eval_err < best + 0.005 and np.mean(mlm_errors[-1000:]) < best_mlm):
-                        # if eval err is in range of best, look at MLM err
-                        train_state = {'global_step': global_step, 'optimizer_state_dict': optimizer.state_dict()}
-                        train_state.update(train_result)
-                        save(args, model, tokenizer, train_state)
-                    best = min(best, eval_err)
-                    eval_errors.append((len(all_losses), eval_err))
-                    model.train()
-            
-                    tb_writer.add_scalars('eval', eval_result, len(all_losses))
-#                     for name, param in model.named_parameters():
-#                         tb_writer.add_histogram(name, param.clone().cpu().data.numpy(), len(all_losses))
-            # end of epoch
-            do_eval = True
-
-        # training complete
-        tb_writer.export_scalars_to_json(os.path.join(args.output_dir, 'training_scalars.json'))
-        tb_writer.close()
-
-
-def evaluate_pretrain_ctx(args, model, eval_dataloader, device, n_train):
-    # Evaluation code for the pre-training of [CTX] special token with the binary classification task (number vs. non-number)
-    model.eval()
-    eval_examples = eval_dataloader.dataset.examples
-    predictions, eval_loss, eval_accuracy, eval_err_sum = {}, 0, 0, 0
-    nb_eval_steps, nb_eval_examples = 0, 0
-    sample_accs = []
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        batch = tuple(t.to(device) for t in batch)
-        input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices, ctx_indices, ctx_labels = batch
-        
-        with torch.no_grad():
-            outputs = model(input_ids, segment_ids, input_mask, random_shift=args.random_shift, ignore_idx=-1, labels=ctx_labels, ctx_indices=ctx_indices)
-            loss, logits = outputs
-            tmp_eval_loss = loss
-
-        def calculate_ctx_accuracy(logits, ctx_labels, ctx_indices):
-            tmp_acc = 0.0
-            for i, batch in enumerate(logits):
-                ctx_labels_np = ctx_labels[i].cpu().data.numpy()
-                pad_start_idx = np.where(ctx_labels_np == -1)[0][0]  # First index of pad_idx in `ctx_indices`
-                pred = torch.argmax(batch[:pad_start_idx], dim=-1)
-                tmp_acc += (pred == ctx_labels[i][:pad_start_idx]).float().mean().item()
-            return tmp_acc
-        
-        tmp_eval_accuracy = calculate_ctx_accuracy(logits, ctx_labels, ctx_indices)
-
-        eval_loss += tmp_eval_loss.mean().item()
-        eval_accuracy += tmp_eval_accuracy
-
-        nb_eval_examples += input_ids.size(0)
-        nb_eval_steps += 1
-
-    eval_loss = eval_loss / nb_eval_steps
-    eval_accuracy = eval_accuracy / nb_eval_examples  # TODO: eval_accuracy and DropEM difference is too big.
-    eval_err_sum /= nb_eval_examples
-
-    result = {'eval_loss': eval_loss,
-              'eval_acc': eval_accuracy,
-              'eval_err': 1 - eval_accuracy}
-
-    output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
-    with open(output_eval_file, "a+") as writer:
-        logger.info("***** Eval results *****")
-        for key in sorted(result.keys()):
-            logger.info("  %s = %s", key, str(result[key]))
-            writer.write("%s = %s\t" % (key, str(result[key])))
-        writer.write("n_train = %d\t" % n_train)
-        writer.write("\n")
-
-    write_file(sample_accs, os.path.join(args.output_dir, "ems.jsonl"))
-
-    return result
-
 
 def save(args, model, tokenizer, train_state_dict):
     # Save a trained model, configuration and tokenizer
@@ -895,12 +726,12 @@ def evaluate(args, model, eval_dataloader, device, n_train, tokenizer):
         digit_ent_indices = batch[-2]
         digit_type_indices = batch[-1]
         batch = tuple(t.to(device) for t in batch[:-3])
-        input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices, ctx_indices, ctx_labels = batch
+        input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices = batch
         
         with torch.no_grad():
-            losses = model(input_ids, segment_ids, input_mask, numbers_in_input, number_indices, ctx_indices, digit_pos, digit_ent_indices, digit_type_indices, random_shift=args.random_shift, target_ids=label_ids,
+            losses = model(input_ids, segment_ids, input_mask, numbers_in_input, number_indices, digit_pos, digit_ent_indices, digit_type_indices, random_shift=args.random_shift, target_ids=label_ids,
                            target_mask=None, answer_as_question_spans=q_spans, answer_as_passage_spans=p_spans,
-                           head_type=head_type, dice_mode=args.surface_form, dice_load=True, tokenizer=tokenizer)
+                           head_type=head_type, dice_mode=args.surface_form, tokenizer=tokenizer)
             loss, errs, dec_loss, dec_errors, span_loss, span_errors, type_loss, type_errors, type_preds, dice_loss, scalar_loss = losses
 
             tmp_eval_loss = loss
@@ -910,7 +741,7 @@ def evaluate(args, model, eval_dataloader, device, n_train, tokenizer):
                 tmp_eval_loss += scalar_loss
 
         for i, sample_acc in enumerate((errs == 0).cpu().tolist()):
-            sample_accs.append({'qid': eval_examples[i+nb_eval_examples].qas_id, 'em': sample_acc})
+            sample_accs.append({'qid': eval_examples[i + nb_eval_examples].qas_id, 'em': sample_acc})
         
         tmp_eval_accuracy = (errs == 0).sum().item()
 
@@ -928,7 +759,7 @@ def evaluate(args, model, eval_dataloader, device, n_train, tokenizer):
     result = {'eval_loss': eval_loss,
               'eval_acc': eval_accuracy,
               'eval_dec_err_sum': eval_err_sum,
-              'eval_err': 1-eval_accuracy}
+              'eval_err': 1 - eval_accuracy}
 
     output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
     with open(output_eval_file, "a+") as writer:
@@ -961,12 +792,12 @@ def inference(args, model, eval_dataloader, device, tokenizer):
         digit_ent_indices = batch[-2]
         digit_type_indices = batch[-1]
         batch = tuple(t.to(device) for t in batch[:-3])
-        input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices, ctx_indices, ctx_labels = batch
+        input_ids, input_mask, segment_ids, label_ids, head_type, q_spans, p_spans, numbers_in_input, number_indices = batch
 
         with torch.no_grad():
-            out = model(input_ids, segment_ids, input_mask=input_mask, numbers_in_input=numbers_in_input, number_indices=number_indices,
+            out = model(input_ids, segment_ids, input_mask=input_mask, numbers_in_input=numbers_in_input, number_indices=number_indices, digit_pos=digit_pos,
                         digit_ent_indices=digit_ent_indices, digit_type_indices=digit_type_indices, random_shift=args.random_shift,
-                        task='inference', dice_mode=args.surface_form, dice_load=True, max_decoding_steps=eval_dataloader.dataset.max_dec_steps)
+                        task='inference', dice_mode=args.surface_form, max_decoding_steps=eval_dataloader.dataset.max_dec_steps)
             # here segment_ids are only used to get the best span prediction
             dec_preds, type_preds, start_preds, end_preds, type_logits = tuple(t.cpu() for t in out)
             # dec_preds: [bsz, max_deocoding_steps], has start_tok
