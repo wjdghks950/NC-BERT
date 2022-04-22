@@ -7,8 +7,8 @@ This repostiory contains codes for **NC-BERT: Exploiting Numerical-Contextual Kn
 The task at hand is DROP, a numerical question answering dataset created by AllenNLP.
 
 Our model leverages a novel attention masking scheme (namely, the **NC-Mask**) to:
-1. Reduce the over-reliance on the parametric knowledge by induceing the model leverage number-related contextual knowledge.
-2. And thereby enable the model to correctly interpret the numbers in the passage (consequently improving the numerical reasoning performance).
+1. **Reduce the over-reliance on the parametric knowledge** by induceing the model leverage number-related contextual knowledge.
+2. And thereby enable the model to **correctly interpret the numbers** in the passage (consequently improving the numerical reasoning performance).
 
 We also provide the code for pre-training the `ALBERT-xxlarge-v2` model as the initial backbone of the **NC-BERT** model (in this case, the **NC-ALBERT**).
 
@@ -16,6 +16,11 @@ The **NC-ALBERT** model, unlike its BERT counterpart, is trained using the sente
 
 **Note**
 - The sentence order prediction is not implemented on the "sentence-level," but on the "text chunk-level."
+
+### Dataset
+To evaluate the numerical extrapolation capability of our model, we also provide in the link down below our six different extrapolation-version of the DROP evaluation dataset.
+
+* Link: [Extrapolation Dataset for Numerical Reasoning models](https://seasoned-thunder-9ed.notion.site/Dataset-DROP-for-Extrapolation-190638bdcc414766b10d7895ebbadd59)
 
 ### Structure
 The repository contains:
