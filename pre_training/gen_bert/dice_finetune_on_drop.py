@@ -503,7 +503,7 @@ def main():
         # prepare model
         model = BertTransformer.from_pretrained(args.model,
             cache_dir=os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_{}'.format(args.local_rank)))
-    
+
     resized_embeddings = model.resize_token_embeddings(len(tokenizer))
     logger.info("Embedding number: %d", resized_embeddings.num_embeddings)
 
