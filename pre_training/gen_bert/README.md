@@ -45,7 +45,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python train_textual_with_numeric.py  --do_
 
 *GenBERT + Entity-Number + Type-Number + Decoder-Number Channel + LSDF*
 ```
-./train_ncmask_nodecnum.sh 0
+./train_ncbert.sh 0
 ```
 
 *GenBERT + DROP*
